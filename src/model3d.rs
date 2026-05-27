@@ -163,6 +163,7 @@ impl GlState {
         gl.enable(glow::SCISSOR_TEST);
         gl.scissor(x, y, w, h);
         gl.clear_color(1.0, 1.0, 1.0, 1.0);
+        gl.disable(glow::CULL_FACE);  // Disable back-face culling - render all faces
         gl.depth_mask(true);
         gl.enable(glow::DEPTH_TEST);
         gl.depth_func(glow::LESS);
