@@ -98,6 +98,7 @@ struct AppState {
     component: Option<Component>,
     wrl_bytes: Option<Vec<u8>>,   // VRML 2.0 bytes (converted from EasyEDA OBJ)
     step_bytes: Option<Vec<u8>>,  // raw STEP binary
+    stl_bytes: Option<Vec<u8>>,   // raw STL binary
     symbol_texture: Option<TextureHandle>,
     footprint_texture: Option<TextureHandle>,
 
@@ -194,6 +195,7 @@ impl App {
         self.state.footprint_texture = None;
         self.state.wrl_bytes = None;
         self.state.step_bytes = None;
+        self.state.stl_bytes = None;
         self.state.status = format!("Loading {}…", lcsc_id);
         let ctx = ctx.clone();
         self.spawn(move |tx| {
@@ -387,6 +389,7 @@ impl eframe::App for App {
                     self.state.footprint_texture = None;
                     self.state.wrl_bytes = None;
                     self.state.step_bytes = None;
+                    self.state.stl_bytes = None;
                     self.state.model_viewer.has_model = false;
                 }
                 BgMsg::RefreshProgress(current, total) => {
@@ -864,7 +867,7 @@ impl eframe::App for App {
                         }
                     }
 
-                    if ui.button("Load STL preview...").clicked() {
+                    if ui.button("Load STL model...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("STL files", &["stl", "STL"])
                             .pick_file()
@@ -886,7 +889,8 @@ impl eframe::App for App {
                                             })
                                             .collect();
                                         self.state.model_viewer.load_stl(&bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
-                                        self.state.status = format!("✓ Loaded STL preview from {}",
+                                        self.state.stl_bytes = Some(bytes);
+                                        self.state.status = format!("✓ Loaded STL from {} - preview and export ready",
                                             path.file_name().unwrap_or_default().to_string_lossy());
                                     } else {
                                         self.state.status = "⚠ Load a component first".to_string();
@@ -1013,8 +1017,16 @@ impl eframe::App for App {
                 if ui.button("  Import  ").clicked() {
                     let lib_name = self.state.settings.lib_name.clone();
                     let paths = export::LibPaths::new(&self.state.settings.lib_path, &lib_name);
-                    let has_step = self.state.step_bytes.is_some();
-                    let model_ext = if has_step { "step" } else { "wrl" };
+
+                    // Priority: STEP > STL > WRL
+                    let model_ext = if self.state.step_bytes.is_some() {
+                        "step"
+                    } else if self.state.stl_bytes.is_some() {
+                        "stl"
+                    } else {
+                        "wrl"
+                    };
+
                     let result: anyhow::Result<()> = (|| {
                         paths.ensure_dirs()?;
                         export::write_symbol(&paths, &comp, &lib_name,
@@ -1047,6 +1059,9 @@ impl eframe::App for App {
                             kicad_offset, kicad_rotation, kicad_scale, model_ext)?;
                         if let Some(step) = &self.state.step_bytes {
                             export::write_step_model(&paths, &comp, step)?;
+                        }
+                        if let Some(stl) = &self.state.stl_bytes {
+                            export::write_stl_model(&paths, &comp, stl)?;
                         }
                         if let Some(wrl) = &self.state.wrl_bytes {
                             export::write_wrl_model(&paths, &comp, wrl)?;
