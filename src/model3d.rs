@@ -162,6 +162,7 @@ impl GlState {
         gl.enable(glow::SCISSOR_TEST);
         gl.scissor(x, y, w, h);
         gl.clear_color(1.0, 1.0, 1.0, 1.0);
+        gl.disable(glow::BLEND);  // Disable blending for opaque 3D rendering
         gl.enable(glow::DEPTH_TEST);
         gl.depth_func(glow::LESS);
         gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
