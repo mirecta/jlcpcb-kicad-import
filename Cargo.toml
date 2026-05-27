@@ -1,0 +1,29 @@
+[package]
+name = "jlcpcb-kicad"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "jlcpcb-kicad"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.31", features = ["glow"] }
+egui = "0.31"
+egui_extras = { version = "0.31", features = ["image"] }
+glam = "0.29"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+resvg = "0.44"
+tiny-skia = "0.11"
+usvg = "0.44"
+rfd = "0.15"
+dirs = "6"
+anyhow = "1"
+image = { version = "0.25", features = ["png"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
