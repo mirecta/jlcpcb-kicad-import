@@ -272,8 +272,8 @@ impl eframe::App for App {
                         let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
                             .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
                             .collect();
-                        // Don't bake rotation for preview - show VRML as-is, matching STEP orientation
-                        self.state.model_viewer.load(bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
+                        // Apply rotation to match how STEP displays in KiCad
+                        self.state.model_viewer.load(bytes, &pads, &drawings, comp.model_init_rotation);
                     } else {
                         self.state.model_viewer.has_model = false;
                     }
