@@ -162,12 +162,18 @@ impl GlState {
         gl.viewport(x, y, w, h);
         gl.enable(glow::SCISSOR_TEST);
         gl.scissor(x, y, w, h);
-        gl.clear_color(1.0, 1.0, 1.0, 1.0);
-        gl.disable(glow::BLEND);       // Disable blending for solid rendering
-        gl.disable(glow::CULL_FACE);   // Disable back-face culling - render all faces
+
+        // Set up depth buffer (z-buffer) properly
+        gl.clear_depth_f32(1.0);       // Clear depth to far plane
         gl.depth_mask(true);           // Enable depth writes
         gl.enable(glow::DEPTH_TEST);   // Enable depth testing
-        gl.depth_func(glow::LESS);     // Standard depth test
+        gl.depth_func(glow::LESS);     // Closer fragments win
+
+        // Disable blending and culling for solid opaque rendering
+        gl.disable(glow::BLEND);
+        gl.disable(glow::CULL_FACE);
+
+        gl.clear_color(1.0, 1.0, 1.0, 1.0);
         gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
 
         // Component model matrix uses the user-chosen scale (component grows/shrinks).
@@ -226,10 +232,13 @@ impl GlState {
         gl.bind_vertex_array(Some(self.comp_vao));
         gl.draw_arrays(glow::TRIANGLES, 0, self.comp_count);
 
+        // Restore GL state for egui
         gl.bind_vertex_array(None);
         gl.use_program(None);
         gl.disable(glow::DEPTH_TEST);
         gl.disable(glow::SCISSOR_TEST);
+        gl.depth_mask(false);  // egui doesn't use depth writes
+        gl.enable(glow::BLEND); // egui needs blending for UI
     }
 
     unsafe fn destroy(&self, gl: &glow::Context) {
