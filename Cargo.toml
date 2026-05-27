@@ -22,6 +22,7 @@ rfd = "0.15"
 dirs = "6"
 anyhow = "1"
 image = { version = "0.25", features = ["png"] }
+stl_io = "0.7"
 
 [profile.release]
 opt-level = 3

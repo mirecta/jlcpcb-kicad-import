@@ -320,6 +320,28 @@ impl ModelViewer {
         }
     }
 
+    pub fn load_stl(&mut self, stl: &[u8], pads: &[PadInfo], drawings: &[PcbDrawing], pre_rotation: [f32; 3]) {
+        match parse_stl(stl, pre_rotation) {
+            Some(mesh) => {
+                let mut gd = self.gl_data.lock().unwrap();
+                gd.center = mesh.center;
+                gd.radius = mesh.radius;
+                gd.pending_pads = Some(pads.iter()
+                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h, shape: p.shape.clone() })
+                    .collect());
+                gd.pending_drawings = Some(drawings.iter()
+                    .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
+                    .collect());
+                gd.pending_mesh = Some(mesh);
+                self.has_model = true;
+            }
+            None => {
+                eprintln!("[3d] STL parse: no geometry");
+                self.has_model = false;
+            }
+        }
+    }
+
     pub fn reset_view(&mut self) {
         self.yaw     = 0.5;
         self.pitch   = 0.4;
@@ -742,6 +764,80 @@ fn parse_wrl(data: &[u8], pre_rotation: [f32; 3]) -> Option<Mesh> {
 
     // Center the model at XZ=(0,0) so it appears over the pad centroid.
     // The VRML from EasyEDA uses its own origin which may differ from the footprint centroid.
+    let (pre_center, _, _) = compute_bounds(&verts);
+    for chunk in verts.chunks_mut(9) {
+        chunk[0] -= pre_center.x;
+        chunk[2] -= pre_center.z;
+    }
+
+    let (center, radius, xz_half) = compute_bounds(&verts);
+    Some(Mesh { count: (verts.len() / 9) as i32, data: verts, center, radius, xz_half })
+}
+
+// ── STL parser ────────────────────────────────────────────────────────────────
+
+fn parse_stl(data: &[u8], pre_rotation: [f32; 3]) -> Option<Mesh> {
+    use std::io::Cursor;
+
+    // Try binary STL first, fall back to ASCII
+    let mut cursor = Cursor::new(data);
+    let stl = stl_io::read_stl(&mut cursor).ok()?;
+
+    let mut verts: Vec<f32> = Vec::new();
+    let color = [0.2, 0.2, 0.2]; // Dark gray default color
+
+    for tri in stl.faces {
+        // STL uses indexed vertices
+        let idx = tri.vertices;
+        if idx[0] >= stl.vertices.len() || idx[1] >= stl.vertices.len() || idx[2] >= stl.vertices.len() {
+            continue; // Invalid indices
+        }
+
+        let a: [f32; 3] = stl.vertices[idx[0]].into();
+        let b: [f32; 3] = stl.vertices[idx[1]].into();
+        let c: [f32; 3] = stl.vertices[idx[2]].into();
+
+        // Use provided normal from STL, or compute if zero
+        let n: [f32; 3] = if tri.normal[0].abs() < 1e-6 && tri.normal[1].abs() < 1e-6 && tri.normal[2].abs() < 1e-6 {
+            flat_normal(a, b, c)
+        } else {
+            tri.normal.into()
+        };
+
+        // Add triangle: 3 vertices × (pos + normal + color)
+        for &p in &[a, b, c] {
+            verts.extend_from_slice(&p);
+            verts.extend_from_slice(&n);
+            verts.extend_from_slice(&color);
+        }
+    }
+
+    if verts.is_empty() { return None; }
+
+    // Apply pre_rotation if needed (same as WRL)
+    let any_rot = pre_rotation.iter().any(|&v| v.abs() > 1e-4);
+    if any_rot {
+        let mat = Mat3::from_euler(
+            glam::EulerRot::XYZ,
+            -pre_rotation[0].to_radians(),
+            -pre_rotation[1].to_radians(),
+            -pre_rotation[2].to_radians(),
+        );
+        for chunk in verts.chunks_mut(9) {
+            let p = Vec3::new(chunk[0], chunk[1], chunk[2]);
+            let n = Vec3::new(chunk[3], chunk[4], chunk[5]);
+            let rp = mat * p;
+            let rn = mat * n;
+            chunk[0] = rp.x; chunk[1] = rp.y; chunk[2] = rp.z;
+            chunk[3] = rn.x; chunk[4] = rn.y; chunk[5] = rn.z;
+        }
+    }
+
+    // Shift Y so model bottom sits 0.1mm above PCB surface
+    let min_y = verts.chunks(9).map(|c| c[1]).fold(f32::MAX, f32::min);
+    for chunk in verts.chunks_mut(9) { chunk[1] += 0.1 - min_y; }
+
+    // Center at XZ=(0,0)
     let (pre_center, _, _) = compute_bounds(&verts);
     for chunk in verts.chunks_mut(9) {
         chunk[0] -= pre_center.x;

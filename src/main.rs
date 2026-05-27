@@ -836,6 +836,75 @@ impl eframe::App for App {
                     self.state.model_scale,
                 );
                 ui.add_space(4.0);
+
+                // Custom STEP/STL model loading
+                ui.horizontal(|ui| {
+                    let has_jlcpcb_step = self.state.step_bytes.is_some();
+                    let step_button_text = if has_jlcpcb_step {
+                        "Replace STEP..."
+                    } else {
+                        "Load STEP..."
+                    };
+
+                    if ui.button(step_button_text).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STEP files", &["step", "stp", "STEP", "STP"])
+                            .pick_file()
+                        {
+                            match std::fs::read(&path) {
+                                Ok(bytes) => {
+                                    self.state.step_bytes = Some(bytes);
+                                    self.state.status = format!("✓ Loaded STEP from {} - now load STL for preview",
+                                        path.file_name().unwrap_or_default().to_string_lossy());
+                                }
+                                Err(e) => {
+                                    self.state.status = format!("⚠ Failed to load STEP: {}", e);
+                                }
+                            }
+                        }
+                    }
+
+                    if ui.button("Load STL preview...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STL files", &["stl", "STL"])
+                            .pick_file()
+                        {
+                            match std::fs::read(&path) {
+                                Ok(bytes) => {
+                                    if let Some(comp) = &self.state.component {
+                                        let pads: Vec<model3d::PadInfo> = comp.pads.iter()
+                                            .map(|p| {
+                                                let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
+                                                let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
+                                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone() }
+                                            })
+                                            .collect();
+                                        let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
+                                            .map(|d| model3d::PcbDrawing {
+                                                tris: d.tris.clone(),
+                                                color: d.color,
+                                            })
+                                            .collect();
+                                        self.state.model_viewer.load_stl(&bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
+                                        self.state.status = format!("✓ Loaded STL preview from {}",
+                                            path.file_name().unwrap_or_default().to_string_lossy());
+                                    } else {
+                                        self.state.status = "⚠ Load a component first".to_string();
+                                    }
+                                }
+                                Err(e) => {
+                                    self.state.status = format!("⚠ Failed to load STL: {}", e);
+                                }
+                            }
+                        }
+                    }
+
+                    if has_jlcpcb_step && !self.state.model_viewer.has_model {
+                        ui.label(egui::RichText::new("(JLCPCB STEP, no preview)").small().color(egui::Color32::from_gray(150)));
+                    }
+                });
+                ui.add_space(4.0);
+
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("3D Model Adjustment").strong());
                     ui.add_space(12.0);
