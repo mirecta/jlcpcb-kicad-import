@@ -1031,6 +1031,7 @@ fn main() -> eframe::Result<()> {
             .with_title("JLCPCB → KiCad")
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([900.0, 600.0]),
+        depth_buffer: 24,  // Request 24-bit depth buffer for 3D rendering
         ..Default::default()
     };
     eframe::run_native(

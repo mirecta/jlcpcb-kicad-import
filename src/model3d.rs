@@ -169,8 +169,11 @@ impl GlState {
         gl.enable(glow::DEPTH_TEST);   // Enable depth testing
         gl.depth_func(glow::LESS);     // Closer fragments win
 
-        // Disable blending and culling for solid opaque rendering
+        // Force opaque rendering - no blending at all
+        gl.blend_func(glow::ONE, glow::ZERO);  // Even if blend is on, dst = src (no blend)
         gl.disable(glow::BLEND);
+        gl.color_mask(true, true, true, true); // Ensure RGBA writes enabled
+
         gl.disable(glow::CULL_FACE);
 
         gl.clear_color(1.0, 1.0, 1.0, 1.0);
