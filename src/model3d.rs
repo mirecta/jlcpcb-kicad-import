@@ -654,16 +654,16 @@ fn parse_wrl(data: &[u8], pre_rotation: [f32; 3]) -> Option<Mesh> {
 
     if verts.is_empty() { return None; }
 
-    // Bake pre_rotation (c_rotation from EasyEDA, same convention as KiCad: first X, then Y, then Z)
-    // into the mesh so the viewer can show the model at 0,0,0 rotation (matching KiCad's STEP display).
+    // Bake pre_rotation (c_rotation from EasyEDA) into the mesh.
+    // Try ZYX rotation order (Z first, then Y, then X) to match KiCad.
     // Must be done BEFORE the min_y shift so the shift uses the correct up-axis.
     let any_rot = pre_rotation.iter().any(|&v| v.abs() > 1e-4);
     if any_rot {
         let mat = Mat3::from_euler(
-            glam::EulerRot::XYZ,
-            pre_rotation[0].to_radians(),
-            pre_rotation[1].to_radians(),
+            glam::EulerRot::ZYX,
             pre_rotation[2].to_radians(),
+            pre_rotation[1].to_radians(),
+            pre_rotation[0].to_radians(),
         );
         for chunk in verts.chunks_mut(9) {
             let p = Vec3::new(chunk[0], chunk[1], chunk[2]);
