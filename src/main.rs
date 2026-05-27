@@ -272,9 +272,8 @@ impl eframe::App for App {
                         let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
                             .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
                             .collect();
-                        // For preview: don't apply EasyEDA rotation, show raw VRML
-                        // User can adjust with controls if needed
-                        self.state.model_viewer.load(bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
+                        // VRML is Y-up, convert to Z-up like STEP: rotate -90° around X
+                        self.state.model_viewer.load(bytes, &pads, &drawings, [-90.0, 0.0, 0.0]);
                     } else {
                         self.state.model_viewer.has_model = false;
                     }
