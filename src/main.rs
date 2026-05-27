@@ -280,8 +280,12 @@ impl eframe::App for App {
         // Poll background channel
         let msg = self.state.bg_rx.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(msg) = msg {
-            self.state.loading = false;
-            self.state.bg_rx = None;
+            // Don't reset loading/bg_rx yet - RefreshProgress needs to keep the channel open
+            let is_progress = matches!(msg, BgMsg::RefreshProgress(_, _));
+            if !is_progress {
+                self.state.loading = false;
+                self.state.bg_rx = None;
+            }
             match msg {
                 BgMsg::SearchDone(results) => {
                     self.state.status = format!("{} results", results.len());
@@ -357,10 +361,8 @@ impl eframe::App for App {
                 }
                 BgMsg::RefreshProgress(current, total) => {
                     self.state.status = format!("Refreshing library... {}/{}", current, total);
-                    self.state.loading = true;
-                    self.state.bg_rx = Some(self.state.bg_rx.take().unwrap());
+                    // Keep loading=true and bg_rx open for more progress messages
                     ctx.request_repaint();
-                    return;
                 }
                 BgMsg::RefreshDone(updated, failed) => {
                     self.state.status = if failed == 0 {
