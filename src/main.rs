@@ -1112,43 +1112,46 @@ fn show_panzoom_image(
 // ── App icon ──────────────────────────────────────────────────────────────────
 
 fn create_app_icon() -> egui::IconData {
-    // Create a 32x32 IC chip icon
-    let size = 32;
+    // Create a 48x48 IC chip icon (bigger for better visibility)
+    let size = 48;
     let mut rgba = vec![0u8; size * size * 4];
 
     for y in 0..size {
         for x in 0..size {
             let idx = (y * size + x) * 4;
 
-            // Create IC chip shape: dark body with pins on sides
-            let is_body = x >= 8 && x < 24 && y >= 8 && y < 24;
-            let is_left_pin = x < 8 && y >= 10 && y < 22 && (y - 10) % 3 < 2;
-            let is_right_pin = x >= 24 && y >= 10 && y < 22 && (y - 10) % 3 < 2;
-            let is_top_pin = y < 8 && x >= 10 && x < 22 && (x - 10) % 3 < 2;
-            let is_bottom_pin = y >= 24 && x >= 10 && x < 22 && (x - 10) % 3 < 2;
-            let is_dot = x >= 10 && x < 12 && y >= 10 && y < 12; // pin 1 indicator
+            // Create bold IC chip: solid square with clear pins
+            let is_body = x >= 10 && x < 38 && y >= 10 && y < 38;
+            let is_pin_left = x < 10 && y >= 14 && y < 34 && (y - 14) % 5 < 3;
+            let is_pin_right = x >= 38 && y >= 14 && y < 34 && (y - 14) % 5 < 3;
+            let is_pin_top = y < 10 && x >= 14 && x < 34 && (x - 14) % 5 < 3;
+            let is_pin_bottom = y >= 38 && x >= 14 && x < 34 && (x - 14) % 5 < 3;
+            let is_dot = x >= 14 && x < 18 && y >= 14 && y < 18; // pin 1 indicator
 
-            if is_body {
-                // Dark chip body
-                rgba[idx] = 40;
-                rgba[idx + 1] = 40;
-                rgba[idx + 2] = 40;
-                rgba[idx + 3] = 255;
-            } else if is_left_pin || is_right_pin || is_top_pin || is_bottom_pin {
-                // Silver pins
-                rgba[idx] = 192;
-                rgba[idx + 1] = 192;
-                rgba[idx + 2] = 192;
-                rgba[idx + 3] = 255;
-            } else if is_dot {
-                // White dot for pin 1
+            if is_dot {
+                // Green PCB color with white dot
                 rgba[idx] = 255;
                 rgba[idx + 1] = 255;
                 rgba[idx + 2] = 255;
                 rgba[idx + 3] = 255;
+            } else if is_body {
+                // Dark chip body (almost black)
+                rgba[idx] = 30;
+                rgba[idx + 1] = 30;
+                rgba[idx + 2] = 30;
+                rgba[idx + 3] = 255;
+            } else if is_pin_left || is_pin_right || is_pin_top || is_pin_bottom {
+                // Bright silver pins
+                rgba[idx] = 220;
+                rgba[idx + 1] = 220;
+                rgba[idx + 2] = 220;
+                rgba[idx + 3] = 255;
             } else {
-                // Transparent background
-                rgba[idx + 3] = 0;
+                // Green PCB background
+                rgba[idx] = 0;
+                rgba[idx + 1] = 120;
+                rgba[idx + 2] = 60;
+                rgba[idx + 3] = 255;
             }
         }
     }
