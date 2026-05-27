@@ -162,7 +162,6 @@ impl GlState {
         gl.enable(glow::SCISSOR_TEST);
         gl.scissor(x, y, w, h);
         gl.clear_color(1.0, 1.0, 1.0, 1.0);
-        gl.disable(glow::BLEND);  // Disable blending for opaque 3D rendering
         gl.enable(glow::DEPTH_TEST);
         gl.depth_func(glow::LESS);
         gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
@@ -681,7 +680,8 @@ fn flat_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     let ac = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
     let n  = [ab[1]*ac[2]-ab[2]*ac[1], ab[2]*ac[0]-ab[0]*ac[2], ab[0]*ac[1]-ab[1]*ac[0]];
     let len = (n[0]*n[0]+n[1]*n[1]+n[2]*n[2]).sqrt().max(1e-9);
-    [n[0]/len, n[1]/len, n[2]/len]
+    // Flip normals to point outward
+    [-n[0]/len, -n[1]/len, -n[2]/len]
 }
 
 fn compute_bounds(verts: &[f32]) -> (Vec3, f32, f32) {
