@@ -604,8 +604,9 @@ impl eframe::App for App {
                             use egui_extras::{Column, TableBuilder};
                             TableBuilder::new(&mut cols[1])
                                 .striped(true)
+                                .resizable(true)
                                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                                .column(Column::exact(110.0))
+                                .column(Column::initial(150.0).at_least(80.0))
                                 .column(Column::remainder().at_least(80.0))
                                 .header(22.0, |mut h| {
                                     h.col(|ui| { ui.strong("Property"); });
