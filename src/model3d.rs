@@ -32,9 +32,10 @@ void main() {
     vec3 L1 = normalize(vec3(1.0, 2.0, 1.5));
     vec3 L2 = normalize(vec3(-1.0, 1.5, -0.5));
     vec3 L3 = normalize(vec3(0.0, -1.0, 0.5));  // soft fill from below
-    float d = max(dot(n, L1), 0.0)
-            + 0.45 * max(dot(n, L2), 0.0)
-            + 0.20 * max(dot(n, L3), 0.0);
+    // Two-sided lighting: use abs() to light both sides of faces
+    float d = abs(dot(n, L1))
+            + 0.45 * abs(dot(n, L2))
+            + 0.20 * abs(dot(n, L3));
     o_col = vec4(v_col * (0.45 + 0.55 * d), 1.0);
 }
 ";
