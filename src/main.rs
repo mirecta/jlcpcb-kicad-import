@@ -1109,6 +1109,57 @@ fn show_panzoom_image(
     rect
 }
 
+// ── App icon ──────────────────────────────────────────────────────────────────
+
+fn create_app_icon() -> egui::IconData {
+    // Create a 32x32 IC chip icon
+    let size = 32;
+    let mut rgba = vec![0u8; size * size * 4];
+
+    for y in 0..size {
+        for x in 0..size {
+            let idx = (y * size + x) * 4;
+
+            // Create IC chip shape: dark body with pins on sides
+            let is_body = x >= 8 && x < 24 && y >= 8 && y < 24;
+            let is_left_pin = x < 8 && y >= 10 && y < 22 && (y - 10) % 3 < 2;
+            let is_right_pin = x >= 24 && y >= 10 && y < 22 && (y - 10) % 3 < 2;
+            let is_top_pin = y < 8 && x >= 10 && x < 22 && (x - 10) % 3 < 2;
+            let is_bottom_pin = y >= 24 && x >= 10 && x < 22 && (x - 10) % 3 < 2;
+            let is_dot = x >= 10 && x < 12 && y >= 10 && y < 12; // pin 1 indicator
+
+            if is_body {
+                // Dark chip body
+                rgba[idx] = 40;
+                rgba[idx + 1] = 40;
+                rgba[idx + 2] = 40;
+                rgba[idx + 3] = 255;
+            } else if is_left_pin || is_right_pin || is_top_pin || is_bottom_pin {
+                // Silver pins
+                rgba[idx] = 192;
+                rgba[idx + 1] = 192;
+                rgba[idx + 2] = 192;
+                rgba[idx + 3] = 255;
+            } else if is_dot {
+                // White dot for pin 1
+                rgba[idx] = 255;
+                rgba[idx + 1] = 255;
+                rgba[idx + 2] = 255;
+                rgba[idx + 3] = 255;
+            } else {
+                // Transparent background
+                rgba[idx + 3] = 0;
+            }
+        }
+    }
+
+    egui::IconData {
+        rgba,
+        width: size as u32,
+        height: size as u32,
+    }
+}
+
 // ── Library refresh helpers ──────────────────────────────────────────────────
 
 fn extract_lcsc_ids(content: &str) -> Vec<String> {
@@ -1210,11 +1261,13 @@ fn update_component_in_lib(content: &str, lcsc_id: &str, comp: &Component) -> St
 
 
 fn main() -> eframe::Result<()> {
+    let icon = create_app_icon();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("JLCPCB → KiCad")
             .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([900.0, 600.0]),
+            .with_min_inner_size([900.0, 600.0])
+            .with_icon(icon),
         depth_buffer: 24,  // Request 24-bit depth buffer for 3D rendering
         ..Default::default()
     };
