@@ -80,6 +80,9 @@ enum BgMsg {
     SearchErr(String),
     DetailDone(Component, Option<Vec<u8>>, Option<Vec<u8>>),  // comp, wrl_vrml, step
     DetailErr(String),
+    RefreshProgress(usize, usize),  // current, total
+    RefreshDone(usize, usize),      // updated_count, failed_count
+    RefreshErr(String),
 }
 
 #[derive(Default)]
@@ -200,6 +203,67 @@ impl App {
             }
         });
     }
+
+    fn do_refresh_library(&mut self) {
+        let lib_path = self.state.settings.lib_path.clone();
+        let lib_name = self.state.settings.lib_name.clone();
+        self.state.status = "Starting library refresh...".to_string();
+
+        self.spawn(move |tx| {
+            use std::fs;
+            use std::path::Path;
+
+            let sym_file = Path::new(&lib_path).join(format!("{}.kicad_sym", lib_name));
+
+            if !sym_file.exists() {
+                let _ = tx.send(BgMsg::RefreshErr(format!("Library file not found: {}", sym_file.display())));
+                return;
+            }
+
+            let content = match fs::read_to_string(&sym_file) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(BgMsg::RefreshErr(format!("Failed to read library: {}", e)));
+                    return;
+                }
+            };
+
+            // Extract all LCSC IDs from the library
+            let lcsc_ids = extract_lcsc_ids(&content);
+            let total = lcsc_ids.len();
+
+            if total == 0 {
+                let _ = tx.send(BgMsg::RefreshErr("No components with LCSC IDs found".to_string()));
+                return;
+            }
+
+            let mut updated_content = content.clone();
+            let mut updated_count = 0;
+            let mut failed_count = 0;
+
+            for (i, lcsc_id) in lcsc_ids.iter().enumerate() {
+                let _ = tx.send(BgMsg::RefreshProgress(i + 1, total));
+
+                match api::fetch_component(lcsc_id) {
+                    Ok(comp) => {
+                        updated_content = update_component_in_lib(&updated_content, lcsc_id, &comp);
+                        updated_count += 1;
+                    }
+                    Err(_) => {
+                        failed_count += 1;
+                    }
+                }
+            }
+
+            // Write back the updated library
+            if let Err(e) = fs::write(&sym_file, updated_content) {
+                let _ = tx.send(BgMsg::RefreshErr(format!("Failed to write library: {}", e)));
+                return;
+            }
+
+            let _ = tx.send(BgMsg::RefreshDone(updated_count, failed_count));
+        });
+    }
 }
 
 impl eframe::App for App {
@@ -291,6 +355,23 @@ impl eframe::App for App {
                 BgMsg::DetailErr(e) => {
                     self.state.status = format!("Error: {}", e);
                 }
+                BgMsg::RefreshProgress(current, total) => {
+                    self.state.status = format!("Refreshing library... {}/{}", current, total);
+                    self.state.loading = true;
+                    self.state.bg_rx = Some(self.state.bg_rx.take().unwrap());
+                    ctx.request_repaint();
+                    return;
+                }
+                BgMsg::RefreshDone(updated, failed) => {
+                    self.state.status = if failed == 0 {
+                        format!("✓ Refreshed {} components", updated)
+                    } else {
+                        format!("✓ Refreshed {} components ({} failed)", updated, failed)
+                    };
+                }
+                BgMsg::RefreshErr(e) => {
+                    self.state.status = format!("Refresh error: {}", e);
+                }
             }
             ctx.request_repaint();
         } else if self.state.loading {
@@ -346,6 +427,9 @@ impl eframe::App for App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Settings").clicked() {
                         self.state.show_settings = true;
+                    }
+                    if ui.add_enabled(!self.state.loading, egui::Button::new("🔄 Refresh Library")).clicked() {
+                        self.do_refresh_library();
                     }
                 });
             });
@@ -1023,6 +1107,105 @@ fn show_panzoom_image(
     }
     let _ = id;
     rect
+}
+
+// ── Library refresh helpers ──────────────────────────────────────────────────
+
+fn extract_lcsc_ids(content: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for line in content.lines() {
+        if line.contains("(property \"LCSC\"") {
+            // Extract LCSC ID from: (property "LCSC" "C7512" ...
+            if let Some(start) = line.find("\"LCSC\" \"") {
+                let after = &line[start + 9..];
+                if let Some(end) = after.find('"') {
+                    ids.push(after[..end].to_string());
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn update_component_in_lib(content: &str, lcsc_id: &str, comp: &Component) -> String {
+    // Find the symbol containing this LCSC ID and update its Stock and Price properties
+    let mut result = String::new();
+    let mut in_target_symbol = false;
+    let mut in_property = false;
+    let mut skip_until_paren_close = false;
+    let mut paren_depth = 0;
+
+    for line in content.lines() {
+        // Check if we found the LCSC property with our ID
+        if line.contains(&format!("(property \"LCSC\" \"{}\"", lcsc_id)) {
+            in_target_symbol = true;
+        }
+
+        // If we're in the target symbol and found Stock or Price property, replace it
+        if in_target_symbol && !skip_until_paren_close {
+            if line.contains("(property \"Stock\" \"") {
+                // Get the indentation
+                let indent = line.chars().take_while(|c| c.is_whitespace()).collect::<String>();
+                // Write new stock property value (just update the value line)
+                let new_line = line.replace(
+                    &format!("(property \"Stock\" \""),
+                    &format!("(property \"Stock\" \"{}", comp.stock).as_str()
+                ).split('"').take(3).collect::<Vec<_>>().join("\"") + "\"";
+                result.push_str(&new_line);
+                result.push('\n');
+                skip_until_paren_close = true;
+                paren_depth = 1;
+                continue;
+            } else if line.contains("(property \"Price\" \"") {
+                // Get the indentation
+                let indent = line.chars().take_while(|c| c.is_whitespace()).collect::<String>();
+                // Write new price property value (just update the value line)
+                let new_line = line.replace(
+                    &format!("(property \"Price\" \""),
+                    &format!("(property \"Price\" \"{}", comp.price).as_str()
+                ).split('"').take(3).collect::<Vec<_>>().join("\"") + "\"";
+                result.push_str(&new_line);
+                result.push('\n');
+                skip_until_paren_close = true;
+                paren_depth = 1;
+                continue;
+            }
+        }
+
+        // If we're skipping lines in a property, track parens to know when to stop
+        if skip_until_paren_close {
+            for ch in line.chars() {
+                match ch {
+                    '(' => paren_depth += 1,
+                    ')' => {
+                        paren_depth -= 1;
+                        if paren_depth == 0 {
+                            skip_until_paren_close = false;
+                            result.push_str(line);
+                            result.push('\n');
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if skip_until_paren_close {
+                continue; // Skip this line, still inside the property
+            } else {
+                continue; // We just wrote the closing line
+            }
+        }
+
+        result.push_str(line);
+        result.push('\n');
+
+        // Check if we're exiting the symbol
+        if in_target_symbol && line.trim() == ")" && line.len() <= 4 {
+            in_target_symbol = false;
+        }
+    }
+
+    result
 }
 
 
