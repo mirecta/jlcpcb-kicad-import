@@ -365,8 +365,12 @@ impl ModelViewer {
                     -self.pitch.cos() * self.yaw.cos(),
                 );
                 let up = right.cross(fwd).normalize();
+
+                // For top/bottom views, flip vertical pan direction to match screen orientation
+                let y_sign = if self.pitch.abs() > 1.4 { -1.0 } else { 1.0 };
+
                 self.cam_pan -= right * (mid_delta.x * world_per_px)
-                              - up    * (mid_delta.y * world_per_px);
+                              - up    * (mid_delta.y * world_per_px * y_sign);
                 ui.ctx().request_repaint();
             }
         }

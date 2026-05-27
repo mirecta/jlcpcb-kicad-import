@@ -579,6 +579,16 @@ fn extract_fp_graphics(easyeda: &serde_json::Value) -> Vec<FpGraphic> {
             let pts: Vec<[f32; 2]> = pts_raw.chunks_exact(2)
                 .map(|c| { let (x, y) = to_mm(c[0], c[1]); [x, y] })
                 .collect();
+
+            // Skip polygons with unreasonably large coordinates (corrupted EasyEDA data)
+            // Reasonable footprints should be within ±100mm
+            let max_coord = pts.iter()
+                .flat_map(|p| [p[0].abs(), p[1].abs()])
+                .fold(0.0f32, f32::max);
+            if max_coord > 100.0 {
+                continue; // Skip this polygon - the outline from TRACK/LINE is still exported
+            }
+
             let fill = layer != "F.CrtYd" && layer != "B.CrtYd";
             let width = if layer == "F.CrtYd" || layer == "B.CrtYd" { 0.05 } else { 0.12 };
             out.push(FpGraphic::Poly { pts, width, layer, fill });

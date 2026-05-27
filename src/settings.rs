@@ -17,7 +17,7 @@ impl Default for Settings {
                 .join("libraries")
                 .to_string_lossy()
                 .to_string(),
-            lib_name: "jlcpcb".to_string(),
+            lib_name: "local_lib".to_string(),
         }
     }
 }

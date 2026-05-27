@@ -135,6 +135,9 @@ struct AppState {
     loading: bool,
 
     bg_rx: Option<std::sync::mpsc::Receiver<BgMsg>>,
+
+    // Icon state
+    icon_set: bool,
 }
 
 struct App {
@@ -142,11 +145,17 @@ struct App {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext) -> Self {
+    fn new(cc: &eframe::CreationContext, lib_path_override: Option<String>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
         let mut state = AppState::default();
         state.settings = settings::load();
+
+        // Override lib_path from command line if provided
+        if let Some(path) = lib_path_override {
+            state.settings.lib_path = path;
+        }
+
         state.model_scale = [1.0, 1.0, 1.0];
         App { state }
     }
@@ -268,6 +277,12 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Set icon at runtime (some platforms require this instead of NativeOptions)
+        if !self.state.icon_set {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(create_app_icon()))));
+            self.state.icon_set = true;
+        }
+
         // Handle deferred row click from inside table closure
         if let Some(i) = self.state.pending_select.take() {
             if self.state.selected_idx != Some(i) {
@@ -858,19 +873,36 @@ impl eframe::App for App {
                     let paths = export::LibPaths::new(&self.state.settings.lib_path, &lib_name);
                     let has_step = self.state.step_bytes.is_some();
                     let model_ext = if has_step { "step" } else { "wrl" };
-                    // STEP files sit correctly in KiCad at 0,0,0 (native Z-up convention).
-                    // WRL from EasyEDA OBJ needs c_rotation to orient correctly in KiCad's Y-up viewer.
-                    let export_rotation = if has_step {
-                        [0.0_f32; 3]
-                    } else {
-                        comp.model_init_rotation
-                    };
                     let result: anyhow::Result<()> = (|| {
                         paths.ensure_dirs()?;
                         export::write_symbol(&paths, &comp, &lib_name,
                             self.state.ref_pos, self.state.val_pos)?;
+
+                        // Convert viewer coordinates (X, Y, Z) to KiCad model coordinates (X, Z, -Y)
+                        // In viewer: Y is vertical (height), Z is depth
+                        // In KiCad: Z is vertical (height), Y is depth, BUT Y-axis is inverted
+                        let kicad_offset = [
+                            self.state.model_offset[0],   // X unchanged
+                            self.state.model_offset[2],   // KiCad Y = viewer Z
+                            -self.state.model_offset[1],  // KiCad Z = -viewer Y (negated!)
+                        ];
+
+                        // Convert rotation (X is negated, Y/Z swapped with Y negated)
+                        let kicad_rotation = [
+                            -self.state.model_rotation[0],  // X negated
+                            self.state.model_rotation[2],   // KiCad Y = viewer Z
+                            -self.state.model_rotation[1],  // KiCad Z = -viewer Y
+                        ];
+
+                        // Convert scale (swap Y/Z but no negation since it's a multiplier)
+                        let kicad_scale = [
+                            self.state.model_scale[0],  // X unchanged
+                            self.state.model_scale[2],  // KiCad Y = viewer Z
+                            self.state.model_scale[1],  // KiCad Z = viewer Y
+                        ];
+
                         export::write_footprint(&paths, &comp, &lib_name,
-                            self.state.model_offset, export_rotation, self.state.model_scale, model_ext)?;
+                            kicad_offset, kicad_rotation, kicad_scale, model_ext)?;
                         if let Some(step) = &self.state.step_bytes {
                             export::write_step_model(&paths, &comp, step)?;
                         }
@@ -1114,43 +1146,61 @@ fn show_panzoom_image(
 // ── App icon ──────────────────────────────────────────────────────────────────
 
 fn create_app_icon() -> egui::IconData {
-    // Create a 48x48 IC chip icon (bigger for better visibility)
-    let size = 48;
+    // Create a 32x32 IC chip icon with solid background
+    let size = 32;
     let mut rgba = vec![0u8; size * size * 4];
 
     for y in 0..size {
         for x in 0..size {
             let idx = (y * size + x) * 4;
 
-            // Create bold IC chip: solid square with clear pins
-            let is_body = x >= 10 && x < 38 && y >= 10 && y < 38;
-            let is_pin_left = x < 10 && y >= 14 && y < 34 && (y - 14) % 5 < 3;
-            let is_pin_right = x >= 38 && y >= 14 && y < 34 && (y - 14) % 5 < 3;
-            let is_pin_top = y < 10 && x >= 14 && x < 34 && (x - 14) % 5 < 3;
-            let is_pin_bottom = y >= 38 && x >= 14 && x < 34 && (x - 14) % 5 < 3;
-            let is_dot = x >= 14 && x < 18 && y >= 14 && y < 18; // pin 1 indicator
+            // IC chip body (center square)
+            let is_body = x >= 8 && x < 24 && y >= 8 && y < 24;
 
-            if is_dot {
-                // Green PCB color with white dot
-                rgba[idx] = 255;
-                rgba[idx + 1] = 255;
-                rgba[idx + 2] = 255;
-                rgba[idx + 3] = 255;
-            } else if is_body {
-                // Dark chip body (almost black)
-                rgba[idx] = 30;
-                rgba[idx + 1] = 30;
-                rgba[idx + 2] = 30;
-                rgba[idx + 3] = 255;
-            } else if is_pin_left || is_pin_right || is_pin_top || is_pin_bottom {
-                // Bright silver pins
-                rgba[idx] = 220;
-                rgba[idx + 1] = 220;
-                rgba[idx + 2] = 220;
+            // Pins on left side (4 pins)
+            let is_left_pins = x < 8 && (
+                (y >= 6 && y < 9) ||   // pin 1
+                (y >= 11 && y < 14) ||  // pin 2
+                (y >= 18 && y < 21) ||  // pin 3
+                (y >= 23 && y < 26)     // pin 4
+            );
+
+            // Pins on right side (4 pins)
+            let is_right_pins = x >= 24 && (
+                (y >= 6 && y < 9) ||   // pin 8
+                (y >= 11 && y < 14) ||  // pin 7
+                (y >= 18 && y < 21) ||  // pin 6
+                (y >= 23 && y < 26)     // pin 5
+            );
+
+            // Pin 1 indicator (small circle top-left)
+            let dx = x as f32 - 10.0;
+            let dy = y as f32 - 10.0;
+            let is_pin1_dot = (dx * dx + dy * dy) < 4.0;
+
+            if is_body {
+                if is_pin1_dot {
+                    // White dot for pin 1
+                    rgba[idx] = 255;
+                    rgba[idx + 1] = 255;
+                    rgba[idx + 2] = 255;
+                    rgba[idx + 3] = 255;
+                } else {
+                    // Dark gray IC body
+                    rgba[idx] = 40;
+                    rgba[idx + 1] = 40;
+                    rgba[idx + 2] = 40;
+                    rgba[idx + 3] = 255;
+                }
+            } else if is_left_pins || is_right_pins {
+                // Silver pins
+                rgba[idx] = 192;
+                rgba[idx + 1] = 192;
+                rgba[idx + 2] = 192;
                 rgba[idx + 3] = 255;
             } else {
-                // Green PCB background
-                rgba[idx] = 0;
+                // Green PCB background (solid, not transparent)
+                rgba[idx] = 40;
                 rgba[idx + 1] = 120;
                 rgba[idx + 2] = 60;
                 rgba[idx + 3] = 255;
@@ -1266,6 +1316,14 @@ fn update_component_in_lib(content: &str, lcsc_id: &str, comp: &Component) -> St
 
 
 fn main() -> eframe::Result<()> {
+    // Parse command-line arguments
+    let args: Vec<String> = std::env::args().collect();
+    let lib_path_override = if args.len() > 1 {
+        Some(args[1].clone())
+    } else {
+        None
+    };
+
     let icon = create_app_icon();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1279,6 +1337,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "jlcpcb-kicad",
         options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, lib_path_override)))),
     )
 }
