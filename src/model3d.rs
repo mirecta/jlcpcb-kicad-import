@@ -163,10 +163,11 @@ impl GlState {
         gl.enable(glow::SCISSOR_TEST);
         gl.scissor(x, y, w, h);
         gl.clear_color(1.0, 1.0, 1.0, 1.0);
-        gl.disable(glow::CULL_FACE);  // Disable back-face culling - render all faces
-        gl.depth_mask(true);
-        gl.enable(glow::DEPTH_TEST);
-        gl.depth_func(glow::LESS);
+        gl.disable(glow::BLEND);       // Disable blending for solid rendering
+        gl.disable(glow::CULL_FACE);   // Disable back-face culling - render all faces
+        gl.depth_mask(true);           // Enable depth writes
+        gl.enable(glow::DEPTH_TEST);   // Enable depth testing
+        gl.depth_func(glow::LESS);     // Standard depth test
         gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
 
         // Component model matrix uses the user-chosen scale (component grows/shrinks).
