@@ -147,6 +147,25 @@ pub fn download_bytes(url: &str) -> Result<Vec<u8>> {
     Ok(resp.bytes()?.to_vec())
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Replace unsupported Unicode characters (box drawing, special separators) with ASCII
+fn sanitize_description(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            // Replace box drawing characters and other Unicode separators with " | "
+            if c > '\u{007F}' && !c.is_alphanumeric() {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // ── Search (list) ─────────────────────────────────────────────────────────────
 
 pub fn search_components(query: &str, page_size: usize, basic_only: bool) -> Result<Vec<SearchResult>> {
@@ -184,7 +203,7 @@ pub fn search_components(query: &str, page_size: usize, basic_only: bool) -> Res
                 manufacturer: item["componentBrandEn"].as_str().unwrap_or("").to_string(),
                 package: item["componentSpecificationEn"].as_str().unwrap_or("").to_string(),
                 category: item["componentTypeEn"].as_str().unwrap_or("").to_string(),
-                description: item["describe"].as_str().unwrap_or("").to_string(),
+                description: sanitize_description(item["describe"].as_str().unwrap_or("")),
                 stock: item["stockCount"].as_u64().unwrap_or(0),
                 price,
                 min_qty: item["minPurchaseNum"].as_u64().unwrap_or(1) as u32,
@@ -772,7 +791,7 @@ fn fetch_jlcpcb_by_lcsc(lcsc_id: &str) -> Result<JlcpcbDetail> {
         manufacturer: item["componentBrandEn"].as_str().unwrap_or("").to_string(),
         package: item["componentSpecificationEn"].as_str().unwrap_or("").to_string(),
         category: item["componentTypeEn"].as_str().unwrap_or("").to_string(),
-        description: item["describe"].as_str().unwrap_or("").to_string(),
+        description: sanitize_description(item["describe"].as_str().unwrap_or("")),
         datasheet: item["dataManualUrl"].as_str().unwrap_or("").to_string(),
         stock: item["stockCount"].as_u64().unwrap_or(0),
         price: format!("{:.4}", price),

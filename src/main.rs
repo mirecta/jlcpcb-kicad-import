@@ -279,8 +279,11 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Set icon at runtime (some platforms require this instead of NativeOptions)
         if !self.state.icon_set {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(create_app_icon()))));
+            let icon = create_app_icon();
+            eprintln!("Setting window icon at runtime...");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(icon))));
             self.state.icon_set = true;
+            eprintln!("Icon set successfully");
         }
 
         // Handle deferred row click from inside table closure
@@ -350,7 +353,12 @@ impl eframe::App for App {
                     self.state.model_viewer.reset_view();
                     if let Some(ref bytes) = wrl {
                         let pads: Vec<model3d::PadInfo> = comp.pads.iter()
-                            .map(|p| model3d::PadInfo { cx: p.cx, cz: p.cy, w: p.w, h: p.h })
+                            .map(|p| {
+                                // If pad is rotated ~90°, swap width and height
+                                let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
+                                let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
+                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h }
+                            })
                             .collect();
                         let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
                             .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -740,19 +748,45 @@ impl eframe::App for App {
                 ui.separator();
                 ui.add_space(4.0);
 
+                // Helper function to create DragValue that responds to scroll wheel
+                let scrollable_drag_helper = |ui: &mut egui::Ui, value: &mut f32, speed: f32, range: Option<std::ops::RangeInclusive<f32>>| {
+                    let mut drag = egui::DragValue::new(value).speed(speed);
+                    if let Some(ref r) = range {
+                        drag = drag.range(r.clone());
+                    }
+                    let response = ui.add(drag);
+
+                    // If hovering over this widget, consume scroll and change value
+                    if response.hovered() {
+                        let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
+                        if scroll_delta.abs() > 0.1 {
+                            // 0.025 per tick (4 ticks per notch = 0.1 per physical scroll)
+                            *value += scroll_delta * 0.0025;
+                            if let Some(ref r) = range {
+                                *value = value.clamp(*r.start(), *r.end());
+                            }
+                            ui.input_mut(|i| {
+                                i.smooth_scroll_delta = egui::Vec2::ZERO;
+                                i.raw_scroll_delta = egui::Vec2::ZERO;
+                            });
+                        }
+                    }
+                    response
+                };
+
                 // Symbol text position
                 ui.label(egui::RichText::new("Symbol Text Positions (mm)").strong());
                 egui::Grid::new("sym_adj").spacing([8.0, 4.0]).show(ui, |ui| {
                     ui.label("Reference X:");
-                    ui.add(egui::DragValue::new(&mut self.state.ref_pos[0]).speed(0.1));
+                    scrollable_drag_helper(ui, &mut self.state.ref_pos[0], 0.1, None);
                     ui.label("Y:");
-                    ui.add(egui::DragValue::new(&mut self.state.ref_pos[1]).speed(0.1));
+                    scrollable_drag_helper(ui, &mut self.state.ref_pos[1], 0.1, None);
                     if ui.button("Reset").clicked() { self.state.ref_pos = [0.0, 3.81]; }
                     ui.end_row();
                     ui.label("Value X:");
-                    ui.add(egui::DragValue::new(&mut self.state.val_pos[0]).speed(0.1));
+                    scrollable_drag_helper(ui, &mut self.state.val_pos[0], 0.1, None);
                     ui.label("Y:");
-                    ui.add(egui::DragValue::new(&mut self.state.val_pos[1]).speed(0.1));
+                    scrollable_drag_helper(ui, &mut self.state.val_pos[1], 0.1, None);
                     if ui.button("Reset").clicked() { self.state.val_pos = [0.0, 2.54]; }
                     ui.end_row();
                 });
@@ -806,53 +840,86 @@ impl eframe::App for App {
                         self.state.model_scale = [s, s, s];
                     }
                 });
-                egui::Grid::new("model_adj").spacing([8.0, 4.0]).show(ui, |ui| {
-                    ui.label(egui::RichText::new("Offset (mm)").strong());
-                    ui.label(egui::RichText::new("Rotation (°)").strong());
-                    ui.label(egui::RichText::new("Scale").strong());
-                    ui.end_row();
-
+                ui.horizontal(|ui| {
                     let unified = self.state.model_unified_scale;
-                    let scale_drag = |ui: &mut egui::Ui, v: &mut f32| -> egui::Response {
-                        ui.add(egui::DragValue::new(v).speed(0.01).range(0.01..=10.0_f32))
-                    };
 
-                    ui.label("X:");
-                    ui.add(egui::DragValue::new(&mut self.state.model_offset[0]).speed(0.1));
-                    ui.label("X:");
-                    ui.add(egui::DragValue::new(&mut self.state.model_rotation[0]).speed(1.0));
-                    ui.label("X:");
-                    if scale_drag(ui, &mut self.state.model_scale[0]).changed() && unified {
-                        let s = self.state.model_scale[0];
-                        self.state.model_scale[1] = s;
-                        self.state.model_scale[2] = s;
-                    }
-                    ui.end_row();
-
-                    ui.label("Y:");
-                    ui.add(egui::DragValue::new(&mut self.state.model_offset[1]).speed(0.1));
-                    ui.label("Y:");
-                    ui.add(egui::DragValue::new(&mut self.state.model_rotation[1]).speed(1.0));
-                    ui.label("Y:");
-                    ui.add_enabled_ui(!unified, |ui| {
-                        scale_drag(ui, &mut self.state.model_scale[1]);
+                    // Offset column
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Offset (mm)").strong());
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label("X");
+                                scrollable_drag_helper(ui, &mut self.state.model_offset[0], 0.1, None);
+                            });
+                            ui.vertical(|ui| {
+                                ui.label("Y");
+                                scrollable_drag_helper(ui, &mut self.state.model_offset[1], 0.1, None);
+                            });
+                            ui.vertical(|ui| {
+                                ui.label("Z");
+                                scrollable_drag_helper(ui, &mut self.state.model_offset[2], 0.01, None);
+                            });
+                        });
                     });
-                    ui.end_row();
 
-                    ui.label("Z (height):");
-                    ui.add(egui::DragValue::new(&mut self.state.model_offset[2]).speed(0.01));
-                    ui.label("Z:");
-                    ui.add(egui::DragValue::new(&mut self.state.model_rotation[2]).speed(1.0));
-                    ui.label("Z:");
-                    ui.add_enabled_ui(!unified, |ui| {
-                        scale_drag(ui, &mut self.state.model_scale[2]);
+                    ui.add_space(10.0);
+
+                    // Rotation column
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Rotation (°)").strong());
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label("X");
+                                scrollable_drag_helper(ui, &mut self.state.model_rotation[0], 1.0, None);
+                            });
+                            ui.vertical(|ui| {
+                                ui.label("Y");
+                                scrollable_drag_helper(ui, &mut self.state.model_rotation[1], 1.0, None);
+                            });
+                            ui.vertical(|ui| {
+                                ui.label("Z");
+                                scrollable_drag_helper(ui, &mut self.state.model_rotation[2], 1.0, None);
+                            });
+                        });
                     });
+
+                    ui.add_space(10.0);
+
+                    // Scale column
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Scale").strong());
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label("X");
+                                let resp = scrollable_drag_helper(ui, &mut self.state.model_scale[0], 0.01, Some(0.01..=10.0));
+                                if resp.changed() && unified {
+                                    let s = self.state.model_scale[0];
+                                    self.state.model_scale[1] = s;
+                                    self.state.model_scale[2] = s;
+                                }
+                            });
+                            ui.add_enabled_ui(!unified, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.label("Y");
+                                    scrollable_drag_helper(ui, &mut self.state.model_scale[1], 0.01, Some(0.01..=10.0));
+                                });
+                            });
+                            ui.add_enabled_ui(!unified, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.label("Z");
+                                    scrollable_drag_helper(ui, &mut self.state.model_scale[2], 0.01, Some(0.01..=10.0));
+                                });
+                            });
+                        });
+                    });
+
+                    ui.add_space(10.0);
+
                     if ui.button("Reset all").clicked() {
                         self.state.model_offset   = [0.0; 3];
                         self.state.model_rotation = [0.0; 3];
                         self.state.model_scale    = [1.0, 1.0, 1.0];
                     }
-                    ui.end_row();
                 });
 
                 ui.add_space(8.0);
@@ -1149,6 +1216,7 @@ fn create_app_icon() -> egui::IconData {
     // Create a 32x32 IC chip icon with solid background
     let size = 32;
     let mut rgba = vec![0u8; size * size * 4];
+    eprintln!("Creating app icon: {}x{} ({} bytes)", size, size, rgba.len());
 
     for y in 0..size {
         for x in 0..size {
@@ -1325,6 +1393,7 @@ fn main() -> eframe::Result<()> {
     };
 
     let icon = create_app_icon();
+    eprintln!("Icon created, setting in NativeOptions...");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("JLCPCB → KiCad")
