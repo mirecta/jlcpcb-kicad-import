@@ -47,6 +47,7 @@ pub struct PadInfo {
     pub cz: f32,  // centre Z in mm (PCB Y-axis → viewer Z-axis)
     pub w:  f32,
     pub h:  f32,
+    pub shape: String,  // "circle", "rect", "oval"
 }
 
 // ── Footprint drawing (silkscreen / fab layer flat geometry) ──────────────────
@@ -304,7 +305,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h })
+                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h, shape: p.shape.clone() })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -396,9 +397,9 @@ impl ModelViewer {
         if !self.has_model {
             ui.painter().text(
                 rect.center(), egui::Align2::CENTER_CENTER,
-                "No 3D model",
-                egui::FontId::proportional(13.0),
-                egui::Color32::from_gray(160),
+                "⚠ No 3D model available from JLCPCB",
+                egui::FontId::proportional(16.0),
+                egui::Color32::from_rgb(200, 100, 50),
             );
             return;
         }
@@ -491,14 +492,15 @@ unsafe fn set_model(
 fn build_model_mat(offset: [f32; 3], rotation: [f32; 3], scale: [f32; 3], center: Vec3) -> Mat4 {
     // Rotate and scale around the component's own bounding-box center, not the world origin.
     // Matrix order: translate(offset + center) * R * S * translate(-center)
+    // Coordinate swap: KiCad Y→viewer Z, KiCad Z→viewer Y
     let offset_world = Vec3::new(offset[0], offset[2], offset[1]);
     let t     = Mat4::from_translation(offset_world + center);
     let t_neg = Mat4::from_translation(-center);
     let r = Mat4::from_euler(
         glam::EulerRot::ZYX,
-        rotation[2].to_radians(),
-        rotation[1].to_radians(),
-        rotation[0].to_radians(),
+        rotation[1].to_radians(),  // Y from UI → Z axis in viewer
+        rotation[2].to_radians(),  // Z from UI → Y axis in viewer
+        rotation[0].to_radians(),  // X stays X
     );
     let s = Mat4::from_scale(Vec3::from(scale));
     t * r * s * t_neg
@@ -532,16 +534,43 @@ fn build_pcb_and_pads(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings
     rect_xz_face(&mut v,  half, -thick, -half,  half, 0.0,  half, [1.0, 0.0,  0.0], ec);
     rect_xz_face(&mut v, -half, -thick,  half, -half, 0.0, -half, [-1.0, 0.0, 0.0], ec);
 
-    // Pads: flat quads at Y=0.05 (above PCB to avoid z-fight)
+    // Pads: flat quads/circles at Y=0.05 (above PCB to avoid z-fight)
     let py = 0.05_f32;
     let pc = [0.85, 0.68, 0.08_f32];
     for pad in pads {
         let hw = pad.w * 0.5;
         let hh = pad.h * 0.5;
-        quad_y(&mut v,
-            pad.cx - hw, pad.cx + hw,
-            pad.cz - hh, pad.cz + hh,
-            py, pc);
+
+        match pad.shape.as_str() {
+            "circle" => {
+                // Render as circle using the larger of w or h as diameter
+                let r = hw.max(hh);
+                circle_y(&mut v, pad.cx, pad.cz, r, py, pc);
+            }
+            "oval" => {
+                // Render as rounded rectangle (simplified as circle for now)
+                if (hw - hh).abs() < 0.01 {
+                    circle_y(&mut v, pad.cx, pad.cz, hw, py, pc);
+                } else {
+                    // Oval: rect + two half-circles
+                    if hw > hh {
+                        // Horizontal oval
+                        quad_y(&mut v, pad.cx - hw + hh, pad.cx + hw - hh, pad.cz - hh, pad.cz + hh, py, pc);
+                        circle_y(&mut v, pad.cx - hw + hh, pad.cz, hh, py, pc);
+                        circle_y(&mut v, pad.cx + hw - hh, pad.cz, hh, py, pc);
+                    } else {
+                        // Vertical oval
+                        quad_y(&mut v, pad.cx - hw, pad.cx + hw, pad.cz - hh + hw, pad.cz + hh - hw, py, pc);
+                        circle_y(&mut v, pad.cx, pad.cz - hh + hw, hw, py, pc);
+                        circle_y(&mut v, pad.cx, pad.cz + hh - hw, hw, py, pc);
+                    }
+                }
+            }
+            _ => {
+                // Default: rectangular pad
+                quad_y(&mut v, pad.cx - hw, pad.cx + hw, pad.cz - hh, pad.cz + hh, py, pc);
+            }
+        }
     }
 
     // Drawing shapes (silkscreen / fab): flat tris at Y=0.08, just above pads
@@ -559,6 +588,34 @@ fn build_pcb_and_pads(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings
     }
 
     v
+}
+
+// Flat circle in XZ plane at given Y, centered at (cx, cz) with radius r
+fn circle_y(v: &mut Vec<f32>, cx: f32, cz: f32, r: f32, y: f32, c: [f32; 3]) {
+    let n = [0.0_f32, 1.0, 0.0];
+    let segments = 24; // Number of triangles
+    let center = [cx, y, cz];
+
+    for i in 0..segments {
+        let a0 = (i as f32) * 2.0 * std::f32::consts::PI / (segments as f32);
+        let a1 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / (segments as f32);
+
+        let p0 = [cx + r * a0.cos(), y, cz + r * a0.sin()];
+        let p1 = [cx + r * a1.cos(), y, cz + r * a1.sin()];
+
+        // Triangle: center -> p0 -> p1
+        v.extend_from_slice(&center);
+        v.extend_from_slice(&n);
+        v.extend_from_slice(&c);
+
+        v.extend_from_slice(&p0);
+        v.extend_from_slice(&n);
+        v.extend_from_slice(&c);
+
+        v.extend_from_slice(&p1);
+        v.extend_from_slice(&n);
+        v.extend_from_slice(&c);
+    }
 }
 
 // Flat quad in XZ plane at given Y, x0..x1, z0..z1 (CCW from above = Y-up)

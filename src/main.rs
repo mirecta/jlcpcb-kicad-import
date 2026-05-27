@@ -357,7 +357,7 @@ impl eframe::App for App {
                                 // If pad is rotated ~90°, swap width and height
                                 let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
                                 let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
-                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h }
+                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone() }
                             })
                             .collect();
                         let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
@@ -380,7 +380,14 @@ impl eframe::App for App {
                     self.state.component = Some(comp);
                 }
                 BgMsg::DetailErr(e) => {
-                    self.state.status = format!("Error: {}", e);
+                    self.state.status = format!("⚠ Error loading component: {}", e);
+                    // Clear stale data so UI doesn't show broken mix of old+new
+                    self.state.component = None;
+                    self.state.symbol_texture = None;
+                    self.state.footprint_texture = None;
+                    self.state.wrl_bytes = None;
+                    self.state.step_bytes = None;
+                    self.state.model_viewer.has_model = false;
                 }
                 BgMsg::RefreshProgress(current, total) => {
                     self.state.status = format!("Refreshing library... {}/{}", current, total);
@@ -749,7 +756,7 @@ impl eframe::App for App {
                 ui.add_space(4.0);
 
                 // Helper function to create DragValue that responds to scroll wheel
-                let scrollable_drag_helper = |ui: &mut egui::Ui, value: &mut f32, speed: f32, range: Option<std::ops::RangeInclusive<f32>>| {
+                let scrollable_drag_helper = |ui: &mut egui::Ui, value: &mut f32, speed: f32, scroll_mult: f32, range: Option<std::ops::RangeInclusive<f32>>| {
                     let mut drag = egui::DragValue::new(value).speed(speed);
                     if let Some(ref r) = range {
                         drag = drag.range(r.clone());
@@ -760,8 +767,7 @@ impl eframe::App for App {
                     if response.hovered() {
                         let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
                         if scroll_delta.abs() > 0.1 {
-                            // 0.025 per tick (4 ticks per notch = 0.1 per physical scroll)
-                            *value += scroll_delta * 0.0025;
+                            *value += scroll_delta * scroll_mult;
                             if let Some(ref r) = range {
                                 *value = value.clamp(*r.start(), *r.end());
                             }
@@ -778,15 +784,15 @@ impl eframe::App for App {
                 ui.label(egui::RichText::new("Symbol Text Positions (mm)").strong());
                 egui::Grid::new("sym_adj").spacing([8.0, 4.0]).show(ui, |ui| {
                     ui.label("Reference X:");
-                    scrollable_drag_helper(ui, &mut self.state.ref_pos[0], 0.1, None);
+                    scrollable_drag_helper(ui, &mut self.state.ref_pos[0], 0.1, 0.0025, None);
                     ui.label("Y:");
-                    scrollable_drag_helper(ui, &mut self.state.ref_pos[1], 0.1, None);
+                    scrollable_drag_helper(ui, &mut self.state.ref_pos[1], 0.1, 0.0025, None);
                     if ui.button("Reset").clicked() { self.state.ref_pos = [0.0, 3.81]; }
                     ui.end_row();
                     ui.label("Value X:");
-                    scrollable_drag_helper(ui, &mut self.state.val_pos[0], 0.1, None);
+                    scrollable_drag_helper(ui, &mut self.state.val_pos[0], 0.1, 0.0025, None);
                     ui.label("Y:");
-                    scrollable_drag_helper(ui, &mut self.state.val_pos[1], 0.1, None);
+                    scrollable_drag_helper(ui, &mut self.state.val_pos[1], 0.1, 0.0025, None);
                     if ui.button("Reset").clicked() { self.state.val_pos = [0.0, 2.54]; }
                     ui.end_row();
                 });
@@ -849,15 +855,15 @@ impl eframe::App for App {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label("X");
-                                scrollable_drag_helper(ui, &mut self.state.model_offset[0], 0.1, None);
+                                scrollable_drag_helper(ui, &mut self.state.model_offset[0], 0.1, 0.0025, None);
                             });
                             ui.vertical(|ui| {
                                 ui.label("Y");
-                                scrollable_drag_helper(ui, &mut self.state.model_offset[1], 0.1, None);
+                                scrollable_drag_helper(ui, &mut self.state.model_offset[1], 0.1, 0.0025, None);
                             });
                             ui.vertical(|ui| {
                                 ui.label("Z");
-                                scrollable_drag_helper(ui, &mut self.state.model_offset[2], 0.01, None);
+                                scrollable_drag_helper(ui, &mut self.state.model_offset[2], 0.01, 0.00025, None);
                             });
                         });
                     });
@@ -870,15 +876,15 @@ impl eframe::App for App {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label("X");
-                                scrollable_drag_helper(ui, &mut self.state.model_rotation[0], 1.0, None);
+                                scrollable_drag_helper(ui, &mut self.state.model_rotation[0], 1.0, 0.25, None);
                             });
                             ui.vertical(|ui| {
                                 ui.label("Y");
-                                scrollable_drag_helper(ui, &mut self.state.model_rotation[1], 1.0, None);
+                                scrollable_drag_helper(ui, &mut self.state.model_rotation[1], 1.0, 0.25, None);
                             });
                             ui.vertical(|ui| {
                                 ui.label("Z");
-                                scrollable_drag_helper(ui, &mut self.state.model_rotation[2], 1.0, None);
+                                scrollable_drag_helper(ui, &mut self.state.model_rotation[2], 1.0, 0.25, None);
                             });
                         });
                     });
@@ -891,7 +897,7 @@ impl eframe::App for App {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label("X");
-                                let resp = scrollable_drag_helper(ui, &mut self.state.model_scale[0], 0.01, Some(0.01..=10.0));
+                                let resp = scrollable_drag_helper(ui, &mut self.state.model_scale[0], 0.01, 0.0025, Some(0.01..=10.0));
                                 if resp.changed() && unified {
                                     let s = self.state.model_scale[0];
                                     self.state.model_scale[1] = s;
@@ -901,13 +907,13 @@ impl eframe::App for App {
                             ui.add_enabled_ui(!unified, |ui| {
                                 ui.vertical(|ui| {
                                     ui.label("Y");
-                                    scrollable_drag_helper(ui, &mut self.state.model_scale[1], 0.01, Some(0.01..=10.0));
+                                    scrollable_drag_helper(ui, &mut self.state.model_scale[1], 0.01, 0.0025, Some(0.01..=10.0));
                                 });
                             });
                             ui.add_enabled_ui(!unified, |ui| {
                                 ui.vertical(|ui| {
                                     ui.label("Z");
-                                    scrollable_drag_helper(ui, &mut self.state.model_scale[2], 0.01, Some(0.01..=10.0));
+                                    scrollable_drag_helper(ui, &mut self.state.model_scale[2], 0.01, 0.0025, Some(0.01..=10.0));
                                 });
                             });
                         });
@@ -985,6 +991,7 @@ impl eframe::App for App {
                         Err(e) => format!("Import error: {e}"),
                     };
                 }
+                ui.add_space(12.0);
             });
         });
     }
@@ -1134,9 +1141,9 @@ fn show_symbol_preview(
         painter.text(
             rect.left_bottom() + egui::vec2(4.0, -4.0),
             egui::Align2::LEFT_BOTTOM,
-            "⚠ no pin data from EasyEDA",
-            egui::FontId::proportional(10.0),
-            egui::Color32::from_rgb(200, 150, 50),
+            "⚠ No pin data from EasyEDA - cannot generate KiCad symbol",
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_rgb(220, 120, 50),
         );
     }
     if pz.zoom != 1.0 || pz.pan != egui::Vec2::ZERO {
