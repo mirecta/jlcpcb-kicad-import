@@ -941,8 +941,9 @@ impl eframe::App for App {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label("X");
-                                let resp = scrollable_drag_helper(ui, &mut self.state.model_scale[0], 0.01, 0.0025, Some(0.01..=10.0));
-                                if resp.changed() && unified {
+                                scrollable_drag_helper(ui, &mut self.state.model_scale[0], 0.01, 0.0025, Some(0.01..=10.0));
+                                // Sync Y and Z when unified (handles both drag and scroll)
+                                if unified {
                                     let s = self.state.model_scale[0];
                                     self.state.model_scale[1] = s;
                                     self.state.model_scale[2] = s;
