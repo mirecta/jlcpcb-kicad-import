@@ -784,7 +784,7 @@ impl eframe::App for App {
                         export::write_symbol(&paths, &comp, &lib_name,
                             self.state.ref_pos, self.state.val_pos)?;
                         export::write_footprint(&paths, &comp, &lib_name,
-                            self.state.model_offset, export_rotation, model_ext)?;
+                            self.state.model_offset, export_rotation, self.state.model_scale, model_ext)?;
                         if let Some(step) = &self.state.step_bytes {
                             export::write_step_model(&paths, &comp, step)?;
                         }

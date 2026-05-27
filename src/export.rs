@@ -74,6 +74,7 @@ pub fn write_footprint(
     lib_name: &str,
     model_offset: [f32; 3],
     model_rotation: [f32; 3],
+    model_scale: [f32; 3],
     model_ext: &str,   // "step" or "wrl"
 ) -> Result<()> {
     let name = package_name(component);
@@ -83,7 +84,7 @@ pub fn write_footprint(
         name = name,
         ext  = model_ext,
     );
-    let content = build_footprint(component, &model_path, model_offset, model_rotation);
+    let content = build_footprint(component, &model_path, model_offset, model_rotation, model_scale);
     let fp_file = paths.fp_dir.join(format!("{}.kicad_mod", name));
     std::fs::write(&fp_file, content)?;
     Ok(())
@@ -248,6 +249,7 @@ fn build_footprint(
     model_path: &str,
     offset: [f32; 3],
     rotation: [f32; 3],
+    scale: [f32; 3],
 ) -> String {
     let name = package_name(c);
 
@@ -315,7 +317,7 @@ fn build_footprint(
     (effects (font (size 1.27 1.27))))
 {pads}{graphics}  (model "{model}"
     (offset (xyz {ox} {oy} {oz}))
-    (scale (xyz 1 1 1))
+    (scale (xyz {sx} {sy} {sz}))
     (rotate (xyz {rx} {ry} {rz}))
   )
 )
@@ -327,6 +329,7 @@ fn build_footprint(
         graphics = graphics,
         model = model_path,
         ox = offset[0], oy = offset[1], oz = offset[2],
+        sx = scale[0], sy = scale[1], sz = scale[2],
         rx = rotation[0], ry = rotation[1], rz = rotation[2],
     )
 }
