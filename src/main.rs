@@ -407,6 +407,8 @@ impl eframe::App for App {
                 use egui_extras::{Column, TableBuilder};
 
                 egui::ScrollArea::horizontal().show(ui, |ui| {
+                    // Force minimum width so table doesn't shrink - triggers horizontal scroll
+                    ui.set_min_width(500.0);
                     TableBuilder::new(ui)
                     .striped(false)
                     .resizable(true)
