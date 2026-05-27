@@ -357,7 +357,7 @@ impl eframe::App for App {
 
         // Left panel: search results table
         egui::SidePanel::left("results")
-            .min_width(520.0)
+            .min_width(200.0)
             .default_width(600.0)
             .show(ctx, |ui| {
                 ui.add_space(2.0);
@@ -406,7 +406,8 @@ impl eframe::App for App {
 
                 use egui_extras::{Column, TableBuilder};
 
-                TableBuilder::new(ui)
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    TableBuilder::new(ui)
                     .striped(false)
                     .resizable(true)
                     .sense(egui::Sense::click())
@@ -492,6 +493,7 @@ impl eframe::App for App {
                             }
                         });
                     });
+                });
 
                 // Process header click (after table — avoids borrow conflict)
                 if let Some(col) = hdr_click.get() {
@@ -815,16 +817,18 @@ fn show_symbol_preview(
     if response.dragged() {
         pz.pan += response.drag_delta();
     }
-    if response.contains_pointer() {
-        let scroll = ui.input_mut(|i| {
-            let s = i.smooth_scroll_delta.y;
-            if s.abs() > 0.1 {
+    // Only zoom if pointer is directly over this specific widget
+    let pointer_over_widget = ui.input(|i| {
+        i.pointer.hover_pos().map_or(false, |pos| rect.contains(pos))
+    });
+    if pointer_over_widget {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 0.1 {
+            // Consume scroll for zoom - prevent page scroll
+            ui.input_mut(|i| {
                 i.smooth_scroll_delta = egui::Vec2::ZERO;
                 i.raw_scroll_delta    = egui::Vec2::ZERO;
-            }
-            s
-        });
-        if scroll.abs() > 0.1 {
+            });
             pz.zoom = (pz.zoom * (1.0 + scroll * 0.005)).clamp(0.1, 30.0);
         }
     }
@@ -971,16 +975,18 @@ fn show_panzoom_image(
         let delta_uv = response.drag_delta() / (display_size * pz.zoom);
         pz.pan -= delta_uv;
     }
-    if response.contains_pointer() {
-        let scroll = ui.input_mut(|i| {
-            let s = i.smooth_scroll_delta.y;
-            if s.abs() > 0.1 {
+    // Only zoom if pointer is directly over this specific widget
+    let pointer_over_widget = ui.input(|i| {
+        i.pointer.hover_pos().map_or(false, |pos| rect.contains(pos))
+    });
+    if pointer_over_widget {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 0.1 {
+            // Consume scroll for zoom - prevent page scroll
+            ui.input_mut(|i| {
                 i.smooth_scroll_delta = egui::Vec2::ZERO;
                 i.raw_scroll_delta    = egui::Vec2::ZERO;
-            }
-            s
-        });
-        if scroll.abs() > 0.1 {
+            });
             pz.zoom = (pz.zoom * (1.0 + scroll * 0.003)).clamp(0.5, 20.0);
         }
     }
