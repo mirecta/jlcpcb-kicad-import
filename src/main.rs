@@ -59,6 +59,7 @@ enum SortCol {
     #[default]
     Stock,
     Price,
+    MinQty,
 }
 
 #[derive(Clone)]
@@ -517,6 +518,7 @@ impl eframe::App for App {
                             SortCol::Stock => ra.stock.cmp(&rb.stock),
                             SortCol::Price => ra.price.partial_cmp(&rb.price)
                                 .unwrap_or(std::cmp::Ordering::Equal),
+                            SortCol::MinQty => ra.min_qty.cmp(&rb.min_qty),
                         };
                         if asc { ord } else { ord.reverse() }
                     });
@@ -549,6 +551,7 @@ impl eframe::App for App {
                     .column(Column::remainder().at_least(80.0))         // Manufacturer
                     .column(Column::exact(68.0))                        // Stock
                     .column(Column::exact(62.0))                        // Price
+                    .column(Column::exact(58.0))                        // Min Qty
                     .header(20.0, |mut h| {
                         let headers: &[(&str, SortCol)] = &[
                             ("B/E",          SortCol::Class),
@@ -558,6 +561,7 @@ impl eframe::App for App {
                             ("Manufacturer", SortCol::Mfr),
                             ("Stock",        SortCol::Stock),
                             ("Price",        SortCol::Price),
+                            ("Min Qty",      SortCol::MinQty),
                         ];
                         for &(title, col) in headers {
                             h.col(|ui| {
@@ -617,6 +621,7 @@ impl eframe::App for App {
                             row.col(|ui| { ui.painter().rect_filled(ui.max_rect(), 0.0, bg); lbl(ui, egui::RichText::new(&r.manufacturer).small()); });
                             row.col(|ui| { ui.painter().rect_filled(ui.max_rect(), 0.0, bg); lbl(ui, egui::RichText::new(r.stock.to_string()).small()); });
                             row.col(|ui| { ui.painter().rect_filled(ui.max_rect(), 0.0, bg); lbl(ui, egui::RichText::new(format!("${:.4}", r.price)).small()); });
+                            row.col(|ui| { ui.painter().rect_filled(ui.max_rect(), 0.0, bg); lbl(ui, egui::RichText::new(r.min_qty.to_string()).small()); });
 
                             if row.response().clicked() {
                                 self.state.pending_select = Some(real_i);
@@ -633,7 +638,7 @@ impl eframe::App for App {
                         self.state.sort_col = Some(col);
                         // Numeric cols default descending, text cols ascending
                         self.state.sort_asc =
-                            !matches!(col, SortCol::Stock | SortCol::Price);
+                            !matches!(col, SortCol::Stock | SortCol::Price | SortCol::MinQty);
                     }
                 }
             });
