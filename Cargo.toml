@@ -23,6 +23,8 @@ dirs = "6"
 anyhow = "1"
 image = { version = "0.25", features = ["png"] }
 stl_io = "0.7"
+truck-stepio = "0.3"
+truck-meshalgo = "0.4"
 
 [profile.release]
 opt-level = 3

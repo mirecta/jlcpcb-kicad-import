@@ -362,20 +362,22 @@ impl eframe::App for App {
                     self.state.model_rotation = [0.0; 3];
                     self.state.model_scale    = [1.0, 1.0, 1.0];
                     self.state.model_viewer.reset_view();
+                    let pads: Vec<model3d::PadInfo> = comp.pads.iter()
+                        .map(|p| {
+                            let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
+                            let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
+                            model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone() }
+                        })
+                        .collect();
+                    let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
+                        .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
+                        .collect();
                     if let Some(ref bytes) = wrl {
-                        let pads: Vec<model3d::PadInfo> = comp.pads.iter()
-                            .map(|p| {
-                                // If pad is rotated ~90°, swap width and height
-                                let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
-                                let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
-                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone() }
-                            })
-                            .collect();
-                        let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
-                            .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
-                            .collect();
-                        // VRML is Y-up, convert to Z-up like STEP: rotate +90° around X
+                        // VRML from EasyEDA is Z-up; rotate -90° around X to Y-up viewer
                         self.state.model_viewer.load(bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
+                    } else if let Some(ref bytes) = step {
+                        // STEP (KiCad) is also Z-up; same rotation needed
+                        self.state.model_viewer.load_step(bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
                     } else {
                         self.state.model_viewer.has_model = false;
                     }
@@ -855,7 +857,39 @@ impl eframe::App for App {
 
                 // Custom 3D model loading
                 ui.horizontal(|ui| {
-                    if ui.button("Load custom 3D model (STL)...").clicked() {
+                    if ui.button("Load custom STEP...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STEP files", &["step", "stp", "STEP", "STP"])
+                            .pick_file()
+                        {
+                            match std::fs::read(&path) {
+                                Ok(bytes) => {
+                                    if let Some(comp) = &self.state.component {
+                                        let pads: Vec<model3d::PadInfo> = comp.pads.iter()
+                                            .map(|p| {
+                                                let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
+                                                let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
+                                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone() }
+                                            })
+                                            .collect();
+                                        let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
+                                            .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
+                                            .collect();
+                                        self.state.model_viewer.load_step(&bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
+                                        self.state.step_bytes = Some(bytes);
+                                        self.state.status = format!("✓ Loaded custom STEP: {}",
+                                            path.file_name().unwrap_or_default().to_string_lossy());
+                                    } else {
+                                        self.state.status = "⚠ Load a component first".to_string();
+                                    }
+                                }
+                                Err(e) => {
+                                    self.state.status = format!("⚠ Failed to load STEP: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    if ui.button("Load custom STL...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("STL files", &["stl", "STL"])
                             .pick_file()
@@ -871,14 +905,11 @@ impl eframe::App for App {
                                             })
                                             .collect();
                                         let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
-                                            .map(|d| model3d::PcbDrawing {
-                                                tris: d.tris.clone(),
-                                                color: d.color,
-                                            })
+                                            .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
                                             .collect();
                                         self.state.model_viewer.load_stl(&bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
                                         self.state.stl_bytes = Some(bytes);
-                                        self.state.status = format!("✓ Loaded custom STL: {} - adjust and import to KiCad",
+                                        self.state.status = format!("✓ Loaded custom STL: {}",
                                             path.file_name().unwrap_or_default().to_string_lossy());
                                     } else {
                                         self.state.status = "⚠ Load a component first".to_string();
