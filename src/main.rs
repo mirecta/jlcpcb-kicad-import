@@ -121,6 +121,11 @@ struct AppState {
     settings: Settings,
     show_settings: bool,
 
+    // Import options
+    import_symbol: bool,
+    import_footprint: bool,
+    import_package: bool,
+
     // Filters
     basic_only: bool,
 
@@ -158,6 +163,9 @@ impl App {
         }
 
         state.model_scale = [1.0, 1.0, 1.0];
+        state.import_symbol = true;
+        state.import_footprint = true;
+        state.import_package = true;
         App { state }
     }
 
@@ -986,6 +994,12 @@ impl eframe::App for App {
                     ui.monospace(&self.state.settings.lib_name);
                 });
                 ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.state.import_symbol, "Symbol");
+                    ui.checkbox(&mut self.state.import_footprint, "Footprint");
+                    ui.checkbox(&mut self.state.import_package, "3D Model");
+                });
+                ui.add_space(4.0);
                 if ui.button("  Import  ").clicked() {
                     let lib_name = self.state.settings.lib_name.clone();
                     let paths = export::LibPaths::new(&self.state.settings.lib_path, &lib_name);
@@ -1001,42 +1015,53 @@ impl eframe::App for App {
 
                     let result: anyhow::Result<()> = (|| {
                         paths.ensure_dirs()?;
-                        export::write_symbol(&paths, &comp, &lib_name,
-                            self.state.ref_pos, self.state.val_pos)?;
 
-                        // Convert viewer coordinates (X, Y, Z) to KiCad model coordinates (X, Z, -Y)
-                        // In viewer: Y is vertical (height), Z is depth
-                        // In KiCad: Z is vertical (height), Y is depth, BUT Y-axis is inverted
-                        let kicad_offset = [
-                            self.state.model_offset[0],   // X unchanged
-                            self.state.model_offset[2],   // KiCad Y = viewer Z
-                            -self.state.model_offset[1],  // KiCad Z = -viewer Y (negated!)
-                        ];
-
-                        // Convert rotation (X is negated, Y/Z swapped with Y negated)
-                        let kicad_rotation = [
-                            -self.state.model_rotation[0],  // X negated
-                            self.state.model_rotation[2],   // KiCad Y = viewer Z
-                            -self.state.model_rotation[1],  // KiCad Z = -viewer Y
-                        ];
-
-                        // Convert scale (swap Y/Z but no negation since it's a multiplier)
-                        let kicad_scale = [
-                            self.state.model_scale[0],  // X unchanged
-                            self.state.model_scale[2],  // KiCad Y = viewer Z
-                            self.state.model_scale[1],  // KiCad Z = viewer Y
-                        ];
-
-                        export::write_footprint(&paths, &comp, &lib_name,
-                            kicad_offset, kicad_rotation, kicad_scale, model_ext)?;
-                        if let Some(step) = &self.state.step_bytes {
-                            export::write_step_model(&paths, &comp, step)?;
+                        // Import symbol
+                        if self.state.import_symbol {
+                            export::write_symbol(&paths, &comp, &lib_name,
+                                self.state.ref_pos, self.state.val_pos)?;
                         }
-                        if let Some(stl) = &self.state.stl_bytes {
-                            export::write_stl_model(&paths, &comp, stl)?;
+
+                        // Import footprint
+                        if self.state.import_footprint {
+                            // Convert viewer coordinates (X, Y, Z) to KiCad model coordinates (X, Z, -Y)
+                            // In viewer: Y is vertical (height), Z is depth
+                            // In KiCad: Z is vertical (height), Y is depth, BUT Y-axis is inverted
+                            let kicad_offset = [
+                                self.state.model_offset[0],   // X unchanged
+                                self.state.model_offset[2],   // KiCad Y = viewer Z
+                                -self.state.model_offset[1],  // KiCad Z = -viewer Y (negated!)
+                            ];
+
+                            // Convert rotation (X is negated, Y/Z swapped with Y negated)
+                            let kicad_rotation = [
+                                -self.state.model_rotation[0],  // X negated
+                                self.state.model_rotation[2],   // KiCad Y = viewer Z
+                                -self.state.model_rotation[1],  // KiCad Z = -viewer Y
+                            ];
+
+                            // Convert scale (swap Y/Z but no negation since it's a multiplier)
+                            let kicad_scale = [
+                                self.state.model_scale[0],  // X unchanged
+                                self.state.model_scale[2],  // KiCad Y = viewer Z
+                                self.state.model_scale[1],  // KiCad Z = viewer Y
+                            ];
+
+                            export::write_footprint(&paths, &comp, &lib_name,
+                                kicad_offset, kicad_rotation, kicad_scale, model_ext)?;
                         }
-                        if let Some(wrl) = &self.state.wrl_bytes {
-                            export::write_wrl_model(&paths, &comp, wrl)?;
+
+                        // Import 3D models
+                        if self.state.import_package {
+                            if let Some(step) = &self.state.step_bytes {
+                                export::write_step_model(&paths, &comp, step)?;
+                            }
+                            if let Some(stl) = &self.state.stl_bytes {
+                                export::write_stl_model(&paths, &comp, stl)?;
+                            }
+                            if let Some(wrl) = &self.state.wrl_bytes {
+                                export::write_wrl_model(&paths, &comp, wrl)?;
+                            }
                         }
                         Ok(())
                     })();
