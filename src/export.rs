@@ -215,15 +215,29 @@ fn build_symbol_body(sym_name: &str, pins: &[Pin], graphics: &[SymGraphic]) -> S
         ));
     } else {
         // Emit EasyEDA-derived graphical elements
+        let mut prev_arc_end: Option<[f32; 2]> = None;
         for g in graphics {
             match g {
                 SymGraphic::Arc { start, mid, end, width } => {
+                    // Close the small gap between consecutive arcs
+                    if let Some(prev) = prev_arc_end {
+                        let dx = start[0] - prev[0];
+                        let dy = start[1] - prev[1];
+                        if (dx*dx + dy*dy).sqrt() < 0.5 {
+                            out.push_str(&format!(
+                                "      (polyline (pts (xy {:.3} {:.3}) (xy {:.3} {:.3}))\n        (stroke (width {:.3}) (type default))\n        (fill (type none))\n      )\n",
+                                prev[0], prev[1], start[0], start[1], width
+                            ));
+                        }
+                    }
                     out.push_str(&format!(
                         "      (arc (start {:.3} {:.3}) (mid {:.3} {:.3}) (end {:.3} {:.3})\n        (stroke (width {:.3}) (type default))\n        (fill (type none))\n      )\n",
                         start[0], start[1], mid[0], mid[1], end[0], end[1], width
                     ));
+                    prev_arc_end = Some(*end);
                 }
                 SymGraphic::Poly { pts, width, fill } => {
+                    prev_arc_end = None;
                     let pts_str: String = pts.iter()
                         .map(|p| format!("(xy {:.3} {:.3})", p[0], p[1]))
                         .collect::<Vec<_>>().join(" ");

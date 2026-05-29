@@ -1290,14 +1290,19 @@ fn show_symbol_preview(
     } else {
         // Draw EasyEDA-derived graphical elements
         let body_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(136, 0, 0));
+        let mut prev_arc_end: Option<egui::Pos2> = None;
         for g in graphics {
             match g {
                 api::SymGraphic::Arc { start, mid, end, .. } => {
-                    // Approximate arc as a polyline through ~24 sampled points
                     let ps = ts(start[0], start[1]);
                     let pm = ts(mid[0],   mid[1]);
                     let pe = ts(end[0],   end[1]);
-                    // Fit a circle through the 3 screen points and sample it
+                    // Fill the small gap between this arc's start and the previous arc's end
+                    if let Some(prev) = prev_arc_end {
+                        if (prev - ps).length() < 12.0 {
+                            painter.line_segment([prev, ps], body_stroke);
+                        }
+                    }
                     let pts = sample_arc_3pt(ps, pm, pe, 24);
                     painter.add(egui::Shape::Path(egui::epaint::PathShape {
                         points: pts,
@@ -1305,8 +1310,10 @@ fn show_symbol_preview(
                         fill: egui::Color32::TRANSPARENT,
                         stroke: egui::epaint::PathStroke::new(1.5, egui::Color32::from_rgb(136, 0, 0)),
                     }));
+                    prev_arc_end = Some(pe);
                 }
                 api::SymGraphic::Poly { pts, .. } => {
+                    prev_arc_end = None;
                     if pts.len() >= 2 {
                         let spts: Vec<egui::Pos2> = pts.iter().map(|p| ts(p[0], p[1])).collect();
                         for w in spts.windows(2) {
@@ -1315,9 +1322,11 @@ fn show_symbol_preview(
                     }
                 }
                 api::SymGraphic::Circle { cx, cy, r, .. } => {
+                    prev_arc_end = None;
                     painter.circle_stroke(ts(*cx, *cy), r * scale, body_stroke);
                 }
                 api::SymGraphic::Rect { x0, y0, x1, y1, fill, .. } => {
+                    prev_arc_end = None;
                     painter.rect(
                         egui::Rect::from_two_pos(ts(*x0, *y0), ts(*x1, *y1)),
                         0.0,
