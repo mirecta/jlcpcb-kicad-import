@@ -9,6 +9,27 @@ use eframe::egui;
 use egui::TextureHandle;
 use settings::Settings;
 
+/// Read text from the system clipboard via platform tools.
+/// Uses subprocess (wl-paste / xclip / xsel) so it never deadlocks on Wayland,
+/// even when our own app is the current clipboard owner.
+fn clipboard_read_text() -> Option<String> {
+    let cmds: &[&[&str]] = &[
+        &["wl-paste", "--no-newline"],
+        &["xclip", "-selection", "clipboard", "-o"],
+        &["xsel", "--clipboard", "--output"],
+    ];
+    for cmd in cmds {
+        if let Ok(out) = std::process::Command::new(cmd[0]).args(&cmd[1..]).output() {
+            if out.status.success() && !out.stdout.is_empty() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn setup_fonts(ctx: &egui::Context) {
     // Try to load a system font with full Unicode coverage (degree signs, CJK, etc.)
     let paths: &[&str] = if cfg!(target_os = "windows") {
@@ -142,9 +163,6 @@ struct AppState {
     loading: bool,
 
     bg_rx: Option<std::sync::mpsc::Receiver<BgMsg>>,
-
-    // Clipboard paste (threaded to avoid Wayland event-loop deadlock)
-    pending_paste: Option<std::sync::mpsc::Receiver<String>>,
 
     // Icon state
     icon_set: bool,
@@ -301,20 +319,6 @@ impl eframe::App for App {
         }
 
         // Handle deferred row click from inside table closure
-        // Drain pending clipboard paste (read on background thread to avoid Wayland deadlock)
-        if let Some(rx) = &self.state.pending_paste {
-            match rx.try_recv() {
-                Ok(text) => {
-                    self.state.search_input = text;
-                    self.state.pending_paste = None;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    ctx.request_repaint_after(std::time::Duration::from_millis(10));
-                }
-                Err(_) => { self.state.pending_paste = None; }
-            }
-        }
-
         if let Some(i) = self.state.pending_select.take() {
             if self.state.selected_idx != Some(i) {
                 self.state.selected_idx = Some(i);
@@ -491,15 +495,9 @@ impl eframe::App for App {
                         ui.close_menu();
                     }
                     if ui.button("Paste").clicked() {
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        self.state.pending_paste = Some(rx);
-                        std::thread::spawn(move || {
-                            if let Ok(mut cb) = arboard::Clipboard::new() {
-                                if let Ok(text) = cb.get_text() {
-                                    let _ = tx.send(text);
-                                }
-                            }
-                        });
+                        if let Some(text) = clipboard_read_text() {
+                            self.state.search_input = text;
+                        }
                         ui.close_menu();
                     }
                 });
