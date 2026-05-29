@@ -130,21 +130,23 @@ fn prop(name: &str, value: &str, at_y: f32, show: bool, _hide_name: bool) -> Str
 /// Falls back to the component's part name for ICs and other types without a simple value.
 pub fn electrical_value(c: &Component) -> String {
     let cat = c.category.to_lowercase();
-    let keys: &[&str] = if cat.contains("capacitor") {
-        &["Capacitance"]
-    } else if cat.contains("resistor") {
-        &["Resistance"]
-    } else if cat.contains("inductor") || cat.contains("ferrite") || cat.contains("choke") {
-        &["Inductance"]
-    } else {
-        &[]
+    let find = |key: &str| -> Option<&str> {
+        c.extra_attrs.iter()
+            .find(|a| a.name.eq_ignore_ascii_case(key))
+            .map(|a| a.value.as_str())
+            .filter(|v| !v.is_empty())
     };
-    for key in keys {
-        if let Some(attr) = c.extra_attrs.iter().find(|a| a.name.eq_ignore_ascii_case(key)) {
-            if !attr.value.is_empty() {
-                return attr.value.clone();
-            }
+
+    if cat.contains("capacitor") {
+        match (find("Capacitance"), find("Voltage Rating")) {
+            (Some(cap), Some(v)) => return format!("{cap}/{v}"),
+            (Some(cap), None)    => return cap.to_string(),
+            _ => {}
         }
+    } else if cat.contains("resistor") {
+        if let Some(v) = find("Resistance") { return v.to_string(); }
+    } else if cat.contains("inductor") || cat.contains("ferrite") || cat.contains("choke") {
+        if let Some(v) = find("Inductance") { return v.to_string(); }
     }
     c.value.clone()
 }
