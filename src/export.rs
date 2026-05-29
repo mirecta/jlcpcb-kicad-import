@@ -126,7 +126,7 @@ fn prop(name: &str, value: &str, at_y: f32, show: bool, _hide_name: bool) -> Str
     )
 }
 
-fn ref_letter(category: &str) -> &'static str {
+pub fn ref_letter(category: &str) -> &'static str {
     let cat = category.to_lowercase();
     if cat.contains("capacitor") { return "C"; }
     if cat.contains("resistor")  { return "R"; }

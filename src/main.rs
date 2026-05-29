@@ -112,6 +112,7 @@ struct AppState {
     // Search input
     search_input: String,
     search_history: Vec<String>,
+    show_suggestions: bool,
 
     // Search results list
     search_results: Vec<SearchResult>,
@@ -520,11 +521,21 @@ impl eframe::App for App {
                         .cloned()
                         .collect()
                 };
-                let show_popup = resp.has_focus() && !suggestions.is_empty();
-                if show_popup {
-                    let popup_id = egui::Id::new("search_history_popup");
+                // Open when text edit gains focus; keep open until selection or click-outside
+                if resp.gained_focus() && !suggestions.is_empty() {
+                    self.state.show_suggestions = true;
+                }
+                if resp.has_focus() && !suggestions.is_empty() {
+                    self.state.show_suggestions = true;
+                }
+                if suggestions.is_empty() {
+                    self.state.show_suggestions = false;
+                }
+
+                let popup_id = egui::Id::new("search_history_popup");
+                if self.state.show_suggestions {
                     let rect = resp.rect;
-                    egui::Area::new(popup_id)
+                    let area_resp = egui::Area::new(popup_id)
                         .fixed_pos(rect.left_bottom())
                         .order(egui::Order::Foreground)
                         .show(ctx, |ui| {
@@ -533,11 +544,25 @@ impl eframe::App for App {
                                 for s in &suggestions {
                                     if ui.selectable_label(false, s.as_str()).clicked() {
                                         self.state.search_input = s.clone();
+                                        self.state.show_suggestions = false;
                                         self.do_search();
                                     }
                                 }
                             });
                         });
+                    // Close if click lands outside both the text field and the popup
+                    let hovered = ctx.input(|i| i.pointer.hover_pos());
+                    let any_click = ctx.input(|i| i.pointer.any_click());
+                    if any_click {
+                        let over_input = hovered.map_or(false, |p| rect.contains(p));
+                        let over_popup  = hovered.map_or(false, |p| area_resp.response.rect.contains(p));
+                        if !over_input && !over_popup {
+                            self.state.show_suggestions = false;
+                        }
+                    }
+                } else {
+                    // Keep egui memory consistent when popup is hidden
+                    ctx.memory_mut(|m| m.close_popup());
                 }
 
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -771,6 +796,7 @@ impl eframe::App for App {
                             &comp.pins,
                             &comp.sym_graphics,
                             &comp.value,
+                            export::ref_letter(&comp.category),
                             self.state.ref_pos,
                             self.state.val_pos,
                             &mut self.state.sym_pz,
@@ -1222,6 +1248,7 @@ fn show_symbol_preview(
     pins: &[Pin],
     graphics: &[api::SymGraphic],
     value: &str,
+    ref_designator: &str,
     ref_pos: [f32; 2],
     val_pos: [f32; 2],
     pz: &mut PanZoom,
@@ -1426,7 +1453,7 @@ fn show_symbol_preview(
     let lbl_font  = egui::FontId::proportional((scale * 1.27).clamp(10.0, 16.0));
     let lbl_color = egui::Color32::from_rgb(0, 0, 160);
     painter.text(ts(ref_pos[0], ref_pos[1]), egui::Align2::CENTER_CENTER,
-        "U", lbl_font.clone(), lbl_color);
+        ref_designator, lbl_font.clone(), lbl_color);
     painter.text(ts(val_pos[0], val_pos[1]), egui::Align2::CENTER_CENTER,
         value, lbl_font, lbl_color);
 
