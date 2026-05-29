@@ -684,33 +684,29 @@ impl eframe::App for App {
 
                 ui.columns(2, |cols| {
                     // Left: previews (interactive pan/zoom)
-                    if comp.pins.is_empty() {
-                        // No pin data → show EasyEDA SVG with Reference/Value overlay
-                        cols[0].label(egui::RichText::new("Symbol  (EasyEDA SVG — no pin data)").strong());
-                        if let Some(tex) = &self.state.symbol_texture {
-                            let rect = show_panzoom_image(&mut cols[0], tex, egui::Vec2::new(360.0, 300.0), &mut self.state.sym_pz, "sym");
-                            // Overlay Reference "U?" and Value labels like KiCad does
-                            let painter = cols[0].painter().with_clip_rect(rect);
-                            let lbl_font  = egui::FontId::proportional(13.0);
-                            let lbl_color = egui::Color32::from_rgb(0, 0, 200);
-                            painter.text(
-                                rect.center_top() + egui::vec2(0.0, 6.0),
-                                egui::Align2::CENTER_TOP,
-                                "U?",
-                                lbl_font.clone(),
-                                lbl_color,
-                            );
-                            painter.text(
-                                rect.center_bottom() + egui::vec2(0.0, -6.0),
-                                egui::Align2::CENTER_BOTTOM,
-                                &comp.value,
-                                lbl_font,
-                                lbl_color,
-                            );
-                        } else {
-                            cols[0].label("(no symbol data)");
-                        }
-                    } else {
+                    if let Some(tex) = &self.state.symbol_texture {
+                        // Prefer EasyEDA SVG when available — shows correct component shape
+                        cols[0].label(egui::RichText::new("Symbol  (drag: pan  scroll: zoom)").strong());
+                        let rect = show_panzoom_image(&mut cols[0], tex, egui::Vec2::new(360.0, 300.0), &mut self.state.sym_pz, "sym");
+                        let painter = cols[0].painter().with_clip_rect(rect);
+                        let lbl_font  = egui::FontId::proportional(13.0);
+                        let lbl_color = egui::Color32::from_rgb(0, 0, 200);
+                        painter.text(
+                            rect.center_top() + egui::vec2(0.0, 6.0),
+                            egui::Align2::CENTER_TOP,
+                            "U?",
+                            lbl_font.clone(),
+                            lbl_color,
+                        );
+                        painter.text(
+                            rect.center_bottom() + egui::vec2(0.0, -6.0),
+                            egui::Align2::CENTER_BOTTOM,
+                            &comp.value,
+                            lbl_font,
+                            lbl_color,
+                        );
+                    } else if !comp.pins.is_empty() {
+                        // Fallback: auto-generated KiCad symbol from pin data
                         cols[0].label(egui::RichText::new("Symbol  (drag: pan  scroll: zoom)").strong());
                         show_symbol_preview(
                             &mut cols[0],
@@ -721,6 +717,9 @@ impl eframe::App for App {
                             &mut self.state.sym_pz,
                             egui::Vec2::new(360.0, 300.0),
                         );
+                    } else {
+                        cols[0].label(egui::RichText::new("Symbol  (no data)").strong());
+                        cols[0].label("(no symbol data available)");
                     }
                     cols[0].add_space(8.0);
                     cols[0].label(egui::RichText::new("Footprint  (drag: pan  scroll: zoom)").strong());
