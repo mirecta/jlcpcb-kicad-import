@@ -112,18 +112,35 @@ pub fn write_stl_model(paths: &LibPaths, component: &Component, stl_bytes: &[u8]
 // ── Symbol builder ────────────────────────────────────────────────────────────
 
 fn prop(name: &str, value: &str, at_y: f32, show: bool, _hide_name: bool) -> String {
-    // KiCad 7/8: `hide` goes inside (effects ...), not after (at ...)
-    let hide = if !show { " hide" } else { "" };
+    // KiCad 8+: (hide yes) is a sibling of (effects), not inside it
+    let hide_line = if !show { "\n      (hide yes)" } else { "" };
     format!(
         r#"    (property "{name}" "{value}"
       (at 0 {at_y} 0)
-      (effects (font (size 1.27 1.27)){hide})
+      (effects (font (size 1.27 1.27))){hide_line}
     )"#,
-        name  = esc(name),
-        value = esc(value),
-        at_y  = at_y,
-        hide  = hide,
+        name      = esc(name),
+        value     = esc(value),
+        at_y      = at_y,
+        hide_line = hide_line,
     )
+}
+
+fn ref_letter(category: &str) -> &'static str {
+    let cat = category.to_lowercase();
+    if cat.contains("capacitor") { return "C"; }
+    if cat.contains("resistor")  { return "R"; }
+    if cat.contains("inductor") || cat.contains("ferrite") || cat.contains("choke") { return "L"; }
+    if cat.contains("transistor") || cat.contains("mosfet") || cat.contains("bjt") { return "Q"; }
+    if cat.contains("diode") || cat.contains("rectifier") || cat.contains("zener") || cat.contains("tvs") { return "D"; }
+    if cat.contains("led") || cat.contains("light emitting") { return "D"; }
+    if cat.contains("crystal") || cat.contains("oscillator") || cat.contains("resonator") { return "Y"; }
+    if cat.contains("fuse") { return "F"; }
+    if cat.contains("switch") || cat.contains("button") || cat.contains("relay") { return "SW"; }
+    if cat.contains("connector") || cat.contains("socket") || cat.contains("header") { return "J"; }
+    if cat.contains("transformer") { return "T"; }
+    if cat.contains("optocoupler") || cat.contains("opto") { return "U"; }
+    "U"
 }
 
 fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32; 2], hide_pin_numbers: bool) -> String {
@@ -139,11 +156,11 @@ fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32;
 
     // Reference and Value with user-adjusted positions
     props.push(format!(
-        r#"    (property "Reference" "U"
+        r#"    (property "Reference" "{}"
       (at {} {} 0)
       (effects (font (size 1.27 1.27)))
     )"#,
-        ref_pos[0], ref_pos[1]
+        ref_letter(&c.category), ref_pos[0], ref_pos[1]
     ));
     props.push(format!(
         r#"    (property "Value" "{}"
@@ -384,26 +401,27 @@ fn esc_pad(s: &str) -> String {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn replace_symbol_in_lib(lib: &str, name: &str, new_sym: &str) -> String {
-    let marker = format!(r#"  (symbol "{}""#, name);
-    if let Some(start) = lib.find(&marker) {
-        let tail = &lib[start..];
+    // Search without leading-whitespace assumption so both tab and space indent work
+    let search = format!(r#"(symbol "{}""#, name);
+    if let Some(sym_offset) = lib.find(&search) {
+        // Walk back to the start of this line (include leading indent)
+        let line_start = lib[..sym_offset].rfind('\n').map_or(0, |i| i + 1);
+        // Depth-scan from the `(` to find the matching closing `)`
+        let tail = &lib[sym_offset..];
         let mut depth = 0usize;
-        let mut end = start;
+        let mut sym_end = sym_offset;
         for (i, ch) in tail.char_indices() {
             match ch {
                 '(' => depth += 1,
                 ')' => {
                     if depth == 0 { break; }
                     depth -= 1;
-                    if depth == 0 {
-                        end = start + i + 1;
-                        break;
-                    }
+                    if depth == 0 { sym_end = sym_offset + i + 1; break; }
                 }
                 _ => {}
             }
         }
-        format!("{}{}{}", &lib[..start], new_sym, &lib[end..])
+        format!("{}{}{}", &lib[..line_start], new_sym, &lib[sym_end..])
     } else {
         lib.to_string()
     }
