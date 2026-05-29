@@ -463,6 +463,25 @@ impl eframe::App for App {
                         .hint_text("Any query: C7512, ULN2003ADR, relay 5V, 100nF 0402…")
                         .desired_width(400.0),
                 );
+                resp.context_menu(|ui| {
+                    if ui.button("Cut").clicked() {
+                        ui.output_mut(|o| o.copied_text = self.state.search_input.clone());
+                        self.state.search_input.clear();
+                        ui.close_menu();
+                    }
+                    if ui.button("Copy").clicked() {
+                        ui.output_mut(|o| o.copied_text = self.state.search_input.clone());
+                        ui.close_menu();
+                    }
+                    if ui.button("Paste").clicked() {
+                        if let Ok(mut cb) = arboard::Clipboard::new() {
+                            if let Ok(text) = cb.get_text() {
+                                self.state.search_input = text;
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                });
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let clicked = ui.add_enabled(!self.state.loading, egui::Button::new("Search")).clicked();
                 ui.checkbox(&mut self.state.basic_only, "Basic only");

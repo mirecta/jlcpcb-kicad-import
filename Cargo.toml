@@ -21,6 +21,7 @@ usvg = "0.44"
 rfd = "0.15"
 dirs = "6"
 anyhow = "1"
+arboard = "3"
 image = { version = "0.25", features = ["png"] }
 stl_io = "0.7"
 truck-stepio = "0.3"
