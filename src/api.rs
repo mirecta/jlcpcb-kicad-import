@@ -720,8 +720,9 @@ fn extract_sym_graphics(easyeda: &serde_json::Value) -> Vec<SymGraphic> {
                 let ew: f32 = p[3].parse().unwrap_or(0.0);
                 let eh: f32 = p[4].parse().unwrap_or(0.0);
                 let width   = stroke_w(&p, 5);
+                let fill    = p.get(6).map(|s| s.starts_with('#')).unwrap_or(false);
                 let p0 = t(ex, ey); let p1 = t(ex + ew, ey + eh);
-                out.push(SymGraphic::Rect { x0: p0[0], y0: p0[1], x1: p1[0], y1: p1[1], width, fill: true });
+                out.push(SymGraphic::Rect { x0: p0[0], y0: p0[1], x1: p1[0], y1: p1[1], width, fill });
             }
 
             // ── SVG path ─────────────────────────────────────────────────────

@@ -235,8 +235,18 @@ fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32;
     let pin_num_clause = if hide_pin_numbers {
         "\n    (pin_numbers\n      (hide yes)\n    )"
     } else { "" };
+    let is_passive = {
+        let cat = c.category.to_lowercase();
+        cat.contains("capacitor") || cat.contains("resistor")
+            || cat.contains("inductor") || cat.contains("ferrite") || cat.contains("choke")
+    };
+    let pin_names_clause = if is_passive {
+        "(pin_names (offset 1.016) (hide yes))"
+    } else {
+        "(pin_names (offset 1.016))"
+    };
     format!(
-        "  (symbol \"{sym_name}\"{pin_num_clause}\n    (pin_names (offset 1.016))\n    (in_bom yes) (on_board yes)\n{props_str}\n{body}\n  )"
+        "  (symbol \"{sym_name}\"{pin_num_clause}\n    {pin_names_clause}\n    (in_bom yes) (on_board yes)\n{props_str}\n{body}\n  )"
     )
 }
 

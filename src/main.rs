@@ -845,9 +845,11 @@ impl eframe::App for App {
                     {
                         let stock_s  = comp.stock.to_string();
                         let minqty_s = comp.min_qty.to_string();
+                        let elec_val = export::electrical_value(&comp);
                         let mut rows: Vec<(&str, &str)> = vec![
                             ("LCSC",         &comp.lcsc_id),
-                            ("Value",        &comp.value),
+                            ("Value",        &elec_val),
+                            ("Part Name",    &comp.value),
                             ("Manufacturer", &comp.manufacturer),
                             ("Package",      &comp.package),
                             ("Category",     &comp.category),
@@ -1351,11 +1353,11 @@ fn show_symbol_preview(
     );
 
     if graphics.is_empty() {
-        // Auto-generated rectangle body — light yellow fill, dark red border
+        // Auto-generated rectangle body — no fill, dark red border
         painter.rect(
             egui::Rect::from_two_pos(ts(bmin_x, bmax_y), ts(bmax_x, bmin_y)),
             0.0,
-            egui::Color32::from_rgb(255, 255, 204),
+            egui::Color32::TRANSPARENT,
             egui::Stroke::new(1.5, egui::Color32::from_rgb(160, 0, 0)),
             egui::StrokeKind::Middle,
         );
@@ -1400,7 +1402,7 @@ fn show_symbol_preview(
                     painter.rect(
                         egui::Rect::from_two_pos(ts(*x0, *y0), ts(*x1, *y1)),
                         0.0,
-                        if *fill { egui::Color32::from_rgb(255, 255, 204) } else { egui::Color32::TRANSPARENT },
+                        if *fill { egui::Color32::WHITE } else { egui::Color32::TRANSPARENT },
                         body_stroke,
                         egui::StrokeKind::Middle,
                     );
@@ -1417,19 +1419,29 @@ fn show_symbol_preview(
 
     for pin in pins {
         let tip = ts(pin.x, pin.y);
-        let sl = if graphics.is_empty() { PIN_LEN } else { pin.stub_len };
-        let body_pt = match pin.angle {
-            0   => ts(pin.x + sl, pin.y),
-            90  => ts(pin.x,      pin.y + sl),
-            180 => ts(pin.x - sl, pin.y),
-            _   => ts(pin.x,      pin.y - sl),
+        let body_pt = if graphics.is_empty() {
+            // Terminate exactly at the rectangle edge (no overshoot into body)
+            match pin.angle {
+                0   => ts(bmin_x, pin.y),
+                90  => ts(pin.x,  bmin_y),
+                180 => ts(bmax_x, pin.y),
+                _   => ts(pin.x,  bmax_y),
+            }
+        } else {
+            match pin.angle {
+                0   => ts(pin.x + pin.stub_len, pin.y),
+                90  => ts(pin.x,                pin.y + pin.stub_len),
+                180 => ts(pin.x - pin.stub_len, pin.y),
+                _   => ts(pin.x,                pin.y - pin.stub_len),
+            }
         };
 
         painter.line_segment([tip, body_pt], egui::Stroke::new(1.0, pin_col));
         painter.circle_filled(tip, 2.0, pin_col);
 
-        // Pin name — just inside stub end (skip if identical to pin number to avoid duplication)
-        if pin.name != pin.number && !pin.name.is_empty() {
+        // Pin name — hidden for passives (R/C/L), otherwise just inside stub end
+        let hide_pin_names = matches!(ref_designator, "R" | "C" | "L");
+        if !hide_pin_names && pin.name != pin.number && !pin.name.is_empty() {
             let (na, no) = match pin.angle {
                 0   => (egui::Align2::LEFT_CENTER,   egui::vec2( 3.0,  0.0)),
                 180 => (egui::Align2::RIGHT_CENTER,  egui::vec2(-3.0,  0.0)),
