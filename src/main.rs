@@ -1302,11 +1302,20 @@ fn show_symbol_preview(
                         stroke: egui::epaint::PathStroke::new(2.0, egui::Color32::from_rgb(136, 0, 0)),
                     }));
                 }
-                api::SymGraphic::Poly { pts, .. } => {
+                api::SymGraphic::Poly { pts, fill, .. } => {
                     if pts.len() >= 2 {
                         let spts: Vec<egui::Pos2> = pts.iter().map(|p| ts(p[0], p[1])).collect();
-                        for w in spts.windows(2) {
-                            painter.line_segment([w[0], w[1]], body_stroke);
+                        if *fill && spts.len() >= 3 {
+                            painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                                points: spts,
+                                closed: true,
+                                fill: egui::Color32::from_rgb(136, 0, 0),
+                                stroke: egui::epaint::PathStroke::new(2.0, egui::Color32::from_rgb(136, 0, 0)),
+                            }));
+                        } else {
+                            for w in spts.windows(2) {
+                                painter.line_segment([w[0], w[1]], body_stroke);
+                            }
                         }
                     }
                 }
@@ -1332,18 +1341,14 @@ fn show_symbol_preview(
     let name_col = egui::Color32::from_rgb(0, 0, 160);
     let num_col  = egui::Color32::from_rgb(130, 0, 0);
 
-    // When custom graphics are present, pin stubs are short (just the EasyEDA wire stub,
-    // ~3 units = 0.76mm). The graphic shapes (arcs etc.) cover the body region.
-    let stub_len = if graphics.is_empty() { PIN_LEN } else { 3.0 * 0.254_f32 };
-
     for pin in pins {
         let tip = ts(pin.x, pin.y);
-        // Stub end: move from tip toward the body by stub_len
+        let sl = if graphics.is_empty() { PIN_LEN } else { pin.stub_len };
         let body_pt = match pin.angle {
-            0   => ts(pin.x + stub_len, pin.y),
-            90  => ts(pin.x,            pin.y + stub_len),
-            180 => ts(pin.x - stub_len, pin.y),
-            _   => ts(pin.x,            pin.y - stub_len),
+            0   => ts(pin.x + sl, pin.y),
+            90  => ts(pin.x,      pin.y + sl),
+            180 => ts(pin.x - sl, pin.y),
+            _   => ts(pin.x,      pin.y - sl),
         };
 
         painter.line_segment([tip, body_pt], egui::Stroke::new(1.0, pin_col));

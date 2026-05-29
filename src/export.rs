@@ -252,8 +252,9 @@ fn build_symbol_body(sym_name: &str, pins: &[Pin], graphics: &[SymGraphic]) -> S
     }
 
     for pin in pins {
+        let pin_len = if graphics.is_empty() { PIN_LEN } else { pin.stub_len };
         out.push_str(&format!(
-            "      (pin {ptype} line\n        (at {x:.3} {y:.3} {angle})\n        (length {PIN_LEN:.3})\n        (name \"{name}\" (effects (font (size 1.27 1.27))))\n        (number \"{num}\" (effects (font (size 1.27 1.27))))\n      )\n",
+            "      (pin {ptype} line\n        (at {x:.3} {y:.3} {angle})\n        (length {pin_len:.3})\n        (name \"{name}\" (effects (font (size 1.27 1.27))))\n        (number \"{num}\" (effects (font (size 1.27 1.27))))\n      )\n",
             ptype  = pin.pin_type,
             x      = pin.x,
             y      = pin.y,

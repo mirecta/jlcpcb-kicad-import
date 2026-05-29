@@ -78,6 +78,7 @@ pub struct Pin {
     pub x: f32,            // wire-connection end in mm, KiCad coords
     pub y: f32,
     pub angle: i32,        // KiCad angle (0=right, 90=up, 180=left, 270=down)
+    pub stub_len: f32,     // pin stub length in mm (varies by EasyEDA format)
 }
 
 /// Full component data loaded after the user picks a result
@@ -348,7 +349,7 @@ fn extract_pins(easyeda: &serde_json::Value) -> Vec<Pin> {
     // 1 EasyEDA schematic unit = 10 mil = 0.254 mm
     const SCALE: f32 = 0.254;
 
-    let mut raw: Vec<(f32, f32, i32, String, String, String)> = Vec::new();
+    let mut raw: Vec<(f32, f32, i32, String, String, String, f32)> = Vec::new();
 
     for shape in &shapes {
         let s = match shape.as_str() { Some(s) => s, None => continue };
@@ -381,7 +382,8 @@ fn extract_pins(easyeda: &serde_json::Value) -> Vec<Pin> {
                 0 => 0, 90 => 270, 180 => 180, 270 => 90, _ => 0,
             };
 
-            raw.push((x, y, kicad_angle, name, number, pin_type));
+            // Legacy EasyEDA pin stub: 3 grid units = 0.762 mm
+            raw.push((x, y, kicad_angle, name, number, pin_type, 3.0 * SCALE));
 
         } else if s.starts_with("P~") {
             // ── EasyEDA Pro schematic format ──────────────────────────────────
@@ -397,13 +399,38 @@ fn extract_pins(easyeda: &serde_json::Value) -> Vec<Pin> {
             if p0.len() < 7 { continue; }
 
             let pin_number = p0[3].to_string();
-            let x: f32 = p0[4].parse().unwrap_or(0.0);
-            let y: f32 = p0[5].parse().unwrap_or(0.0);
             let rot: i32 = p0[6].parse::<i32>().unwrap_or(0).rem_euclid(360);
 
             // P~ rotation = direction the pin wire points outward (away from body).
             // KiCad angle = direction toward body = (rot + 180) % 360.
             let kicad_angle = (rot + 180) % 360;
+
+            // The path segment (M x,y h±len) gives pin tip in LOCAL component coords —
+            // the same coordinate system used by the symbol's PATH~/LINE~ graphics.
+            // p0[4],p0[5] are absolute schematic coordinates: wrong for our purposes.
+            // Strip color suffix "M x y h n~#color" → "M x y h n" before SVG parse
+            let path_seg = [1usize, 2, 3].iter().find_map(|&i| {
+                let raw = segs.get(i).copied()?;
+                let svg = raw.split('~').next().unwrap_or(raw);
+                let sub = parse_svg_d(svg);
+                if sub.is_empty() { None } else { Some(sub) }
+            }).unwrap_or_default();
+
+            let (local_x, local_y) = path_seg.first()
+                .and_then(|(pts, _)| pts.first().copied())
+                .unwrap_or_else(|| (
+                    p0[4].parse().unwrap_or(0.0),
+                    p0[5].parse().unwrap_or(0.0),
+                ));
+
+            let stub_mm = path_seg.first()
+                .and_then(|(pts, _)| {
+                    let (x1, y1) = pts.first().copied()?;
+                    let (x2, y2) = pts.last().copied()?;
+                    let d = (x2 - x1).abs().max((y2 - y1).abs()) * SCALE;
+                    if d > 0.01 { Some(d) } else { None }
+                })
+                .unwrap_or(2.54);
 
             // Segments 3 and 4 are text labels. Identify name vs number by matching
             // against pin_number: the segment whose text == pin_number is the number label.
@@ -422,7 +449,7 @@ fn extract_pins(easyeda: &serde_json::Value) -> Vec<Pin> {
                 text3
             };
 
-            raw.push((x, y, kicad_angle, pin_name, pin_number, "passive".to_string()));
+            raw.push((local_x, local_y, kicad_angle, pin_name, pin_number, "passive".to_string(), stub_mm));
         }
     }
 
@@ -432,13 +459,14 @@ fn extract_pins(easyeda: &serde_json::Value) -> Vec<Pin> {
     let cx = raw.iter().map(|(x, ..)| *x).sum::<f32>() / raw.len() as f32;
     let cy = raw.iter().map(|(_, y, ..)| *y).sum::<f32>() / raw.len() as f32;
 
-    raw.into_iter().map(|(x, y, angle, name, number, pin_type)| Pin {
+    raw.into_iter().map(|(x, y, angle, name, number, pin_type, stub_len)| Pin {
         name,
         number,
         pin_type,
         x:  (x - cx) * SCALE,
         y: -(y - cy) * SCALE,
         angle,
+        stub_len,
     }).collect()
 }
 
@@ -458,10 +486,25 @@ fn ee_pin_centroid(shapes: &[serde_json::Value]) -> (f32, f32) {
                 }
             }
         } else if s.starts_with("P~") {
-            let p0: Vec<&str> = s.split("^^").next().unwrap_or("").split('~').collect();
-            if p0.len() >= 6 {
-                if let (Ok(x), Ok(y)) = (p0[4].parse::<f32>(), p0[5].parse::<f32>()) {
-                    xs.push(x); ys.push(y);
+            // P~ pin tip in LOCAL component coords lives in the path segment (M x,y h±len).
+            // The segment may have a color suffix "M x y h n~#color" — strip after first ~.
+            let segs: Vec<&str> = s.split("^^").collect();
+            let tip = [1usize, 2, 3].iter().find_map(|&i| {
+                let raw_seg = segs.get(i).copied().unwrap_or("");
+                let svg = raw_seg.split('~').next().unwrap_or(raw_seg);
+                parse_svg_d(svg)
+                    .into_iter().next()
+                    .and_then(|(pts, _)| pts.first().copied())
+            });
+            if let Some((x, y)) = tip {
+                xs.push(x); ys.push(y);
+            } else {
+                // Absolute fallback — better than nothing
+                let p0: Vec<&str> = segs[0].split('~').collect();
+                if p0.len() >= 6 {
+                    if let (Ok(x), Ok(y)) = (p0[4].parse::<f32>(), p0[5].parse::<f32>()) {
+                        xs.push(x); ys.push(y);
+                    }
                 }
             }
         }
@@ -506,6 +549,83 @@ fn svg_arc_mid(x1: f32, y1: f32, mut rx: f32, mut ry: f32, f_a: bool, f_s: bool,
     [cx + rx * mt.cos(), cy + ry * mt.sin()]
 }
 
+/// Parse an SVG path "d" attribute into sub-paths: (points_in_ee_coords, is_closed).
+/// Handles M/m L/l H/h V/v Z/z commands; ignores curves (not used in EasyEDA symbols).
+fn parse_svg_d(d: &str) -> Vec<(Vec<(f32, f32)>, bool)> {
+    let mut result: Vec<(Vec<(f32, f32)>, bool)> = Vec::new();
+    let mut pts: Vec<(f32, f32)> = Vec::new();
+    let mut cx = 0.0_f32;
+    let mut cy = 0.0_f32;
+
+    // Expand command letters with surrounding spaces, replace commas
+    let mut expanded = String::with_capacity(d.len() * 2);
+    for c in d.chars() {
+        if c.is_ascii_alphabetic() {
+            expanded.push(' '); expanded.push(c); expanded.push(' ');
+        } else if c == ',' {
+            expanded.push(' ');
+        } else {
+            expanded.push(c);
+        }
+    }
+    let tokens: Vec<&str> = expanded.split_whitespace().collect();
+    let mut i = 0;
+    let mut cmd = ' ';
+
+    while i < tokens.len() {
+        let tok = tokens[i];
+        if tok.len() == 1 && tok.chars().next().map_or(false, |c| c.is_ascii_alphabetic()) {
+            match tok {
+                "Z" | "z" => {
+                    if !pts.is_empty() { result.push((std::mem::take(&mut pts), true)); }
+                    cmd = ' ';
+                }
+                "M" | "m" => {
+                    if !pts.is_empty() { result.push((std::mem::take(&mut pts), false)); }
+                    cmd = tok.chars().next().unwrap();
+                }
+                _ => { cmd = tok.chars().next().unwrap(); }
+            }
+            i += 1;
+            continue;
+        }
+        let advance = match cmd {
+            'M' if i + 1 < tokens.len() => {
+                if let (Ok(x), Ok(y)) = (tok.parse::<f32>(), tokens[i+1].parse::<f32>()) {
+                    cx = x; cy = y; pts.push((cx, cy)); cmd = 'L';
+                }
+                2
+            }
+            'm' if i + 1 < tokens.len() => {
+                if let (Ok(dx), Ok(dy)) = (tok.parse::<f32>(), tokens[i+1].parse::<f32>()) {
+                    cx += dx; cy += dy; pts.push((cx, cy)); cmd = 'l';
+                }
+                2
+            }
+            'L' if i + 1 < tokens.len() => {
+                if let (Ok(x), Ok(y)) = (tok.parse::<f32>(), tokens[i+1].parse::<f32>()) {
+                    cx = x; cy = y; pts.push((cx, cy));
+                }
+                2
+            }
+            'l' if i + 1 < tokens.len() => {
+                if let (Ok(dx), Ok(dy)) = (tok.parse::<f32>(), tokens[i+1].parse::<f32>()) {
+                    cx += dx; cy += dy; pts.push((cx, cy));
+                }
+                2
+            }
+            'H' => { if let Ok(x)  = tok.parse::<f32>() { cx = x;  pts.push((cx, cy)); } 1 }
+            'h' => { if let Ok(dx) = tok.parse::<f32>() { cx += dx; pts.push((cx, cy)); } 1 }
+            'V' => { if let Ok(y)  = tok.parse::<f32>() { cy = y;  pts.push((cx, cy)); } 1 }
+            'v' => { if let Ok(dy) = tok.parse::<f32>() { cy += dy; pts.push((cx, cy)); } 1 }
+            _ => 1,
+        };
+        i += advance;
+    }
+    if !pts.is_empty() { result.push((pts, false)); }
+    result
+}
+
 /// Parse "M x y A rx ry xrot fa fs x2 y2" from an EasyEDA A~ path string.
 fn parse_ee_arc(path: &str) -> Option<([f32;2], f32, f32, bool, bool, [f32;2])> {
     let t: Vec<&str> = path.split_whitespace().collect();
@@ -518,70 +638,154 @@ fn parse_ee_arc(path: &str) -> Option<([f32;2], f32, f32, bool, bool, [f32;2])> 
           [t[ai+6].parse().ok()?, t[ai+7].parse().ok()?]))
 }
 
+fn is_color(s: &str) -> bool {
+    s.starts_with('#') || s == "none" || s.is_empty()
+}
+
 fn extract_sym_graphics(easyeda: &serde_json::Value) -> Vec<SymGraphic> {
     let shapes = ee_shape_array(easyeda);
     if shapes.is_empty() { return vec![]; }
     let (cx, cy) = ee_pin_centroid(&shapes);
     const S: f32 = 0.254; // EasyEDA unit → mm
-
-    // Transform: centre + Y-flip + scale
     let t = |ex: f32, ey: f32| -> [f32; 2] { [(ex - cx) * S, -(ey - cy) * S] };
+
+    // Parse space/comma separated "x y x y ..." into KiCad points.
+    let pts_from_str = |src: &str| -> Vec<[f32; 2]> {
+        let nums: Vec<f32> = src
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        nums.chunks_exact(2).map(|c| t(c[0], c[1])).collect()
+    };
+
+    // First float field at or after index `start` that parses as a positive number.
+    let stroke_w = |p: &[&str], start: usize| -> f32 {
+        p[start..].iter()
+            .find_map(|s| s.parse::<f32>().ok().filter(|&v| v > 0.0))
+            .unwrap_or(1.0) * S
+    };
+
+    let is_filled = |p: &[&str]| -> bool {
+        p.iter().any(|s| is_color(s) && *s != "none" && !s.is_empty()
+            && p.iter().filter(|x| is_color(x)).count() > 1)
+    };
 
     let mut out: Vec<SymGraphic> = Vec::new();
 
     for shape in &shapes {
         let s = match shape.as_str() { Some(s) => s, None => continue };
+        let (kind, _) = match s.split_once('~') { Some(p) => p, None => continue };
 
-        if s.starts_with("A~") || s.starts_with("ARC~") {
-            // A~<svgpath>~~color~width~...
-            let p: Vec<&str> = s.splitn(10, '~').collect();
-            let path  = p.get(1).unwrap_or(&"");
-            let width = p.get(4).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0) * S;
-            if let Some(([x1,y1], rx, ry, fa, fs, [x2,y2])) = parse_ee_arc(path) {
-                let mid = svg_arc_mid(x1, y1, rx, ry, fa, fs, x2, y2);
-                // Snap arc endpoint Y to nearest grid (0.254 mm = 1 EasyEDA unit)
-                // so adjacent arcs share exactly the same baseline Y.
-                let snap = |v: f32| (v / S).round() * S;
-                let mut s = t(x1, y1); s[1] = snap(s[1]);
-                let mut e = t(x2, y2); e[1] = snap(e[1]);
-                out.push(SymGraphic::Arc {
-                    start: s, mid: t(mid[0], mid[1]), end: e, width,
-                });
+        // Non-graphic shape types — skip
+        match kind {
+            "P" | "PIN" | "PAD" | "WIRE" | "NETLABEL" | "NETFLAG" |
+            "JUNCTION" | "TEXT" | "NOTE" | "ANNOTATION" | "SCHLIB" => continue,
+            _ => {}
+        }
+
+        let p: Vec<&str> = s.splitn(10, '~').collect();
+
+        match kind {
+            // ── Arc ────────────────────────────────────────────────────────────
+            "A" | "ARC" => {
+                let path  = p.get(1).copied().unwrap_or("");
+                let width = p.get(4).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0) * S;
+                if let Some(([x1,y1], rx, ry, fa, fs, [x2,y2])) = parse_ee_arc(path) {
+                    let mid  = svg_arc_mid(x1, y1, rx, ry, fa, fs, x2, y2);
+                    let snap = |v: f32| (v / S).round() * S;
+                    let mut s = t(x1, y1); s[1] = snap(s[1]);
+                    let mut e = t(x2, y2); e[1] = snap(e[1]);
+                    out.push(SymGraphic::Arc { start: s, mid: t(mid[0], mid[1]), end: e, width });
+                }
             }
 
-        } else if s.starts_with("POLYLINE~") || s.starts_with("LINE~") {
-            // POLYLINE~x1 y1 x2 y2 ...~width~...
-            let p: Vec<&str> = s.splitn(5, '~').collect();
-            let pts_str = p.get(1).unwrap_or(&"");
-            let width = p.get(2).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0) * S;
-            let nums: Vec<f32> = pts_str.split(|c: char| c.is_whitespace() || c == ',')
-                .filter_map(|s| s.parse().ok()).collect();
-            let pts: Vec<[f32;2]> = nums.chunks_exact(2).map(|c| t(c[0], c[1])).collect();
-            if pts.len() >= 2 { out.push(SymGraphic::Poly { pts, width, fill: false }); }
+            // ── Polyline / line ────────────────────────────────────────────────
+            "POLYLINE" | "LINE" | "PLINE" | "PL" => {
+                let pts   = pts_from_str(p.get(1).copied().unwrap_or(""));
+                let width = stroke_w(&p, 2);
+                if pts.len() >= 2 { out.push(SymGraphic::Poly { pts, width, fill: false }); }
+            }
 
-        } else if s.starts_with("CIRCLE~") {
-            // CIRCLE~cx~cy~r~...~width~fillColor~...
-            let p: Vec<&str> = s.split('~').collect();
-            if p.len() < 4 { continue; }
-            let ecx: f32 = p[1].parse().unwrap_or(0.0);
-            let ecy: f32 = p[2].parse().unwrap_or(0.0);
-            let er:  f32 = p[3].parse().unwrap_or(0.0);
-            let width = p.get(5).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0) * S;
-            let fill  = p.get(6).map(|s| *s != "none" && !s.is_empty()).unwrap_or(false);
-            let c = t(ecx, ecy);
-            out.push(SymGraphic::Circle { cx: c[0], cy: c[1], r: er * S, width, fill });
+            // ── Filled polygon ────────────────────────────────────────────────
+            "POLYGON" | "POLY" | "PG" => {
+                let pts   = pts_from_str(p.get(1).copied().unwrap_or(""));
+                let width = stroke_w(&p, 2);
+                if pts.len() >= 2 { out.push(SymGraphic::Poly { pts, width, fill: true }); }
+            }
 
-        } else if s.starts_with("RECT~") {
-            // RECT~x~y~width~height~...~strokeWidth~...
-            let p: Vec<&str> = s.split('~').collect();
-            if p.len() < 5 { continue; }
-            let ex: f32 = p[1].parse().unwrap_or(0.0);
-            let ey: f32 = p[2].parse().unwrap_or(0.0);
-            let ew: f32 = p[3].parse().unwrap_or(0.0);
-            let eh: f32 = p[4].parse().unwrap_or(0.0);
-            let width = p.get(7).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0) * S;
-            let p0 = t(ex, ey); let p1 = t(ex + ew, ey + eh);
-            out.push(SymGraphic::Rect { x0: p0[0], y0: p0[1], x1: p1[0], y1: p1[1], width, fill: true });
+            // ── Circle ────────────────────────────────────────────────────────
+            "CIRCLE" => {
+                if p.len() < 4 { continue; }
+                let ecx: f32 = p[1].parse().unwrap_or(0.0);
+                let ecy: f32 = p[2].parse().unwrap_or(0.0);
+                let er:  f32 = p[3].parse().unwrap_or(0.0);
+                let width    = stroke_w(&p, 4);
+                let fill     = p.get(6).map(|s| !is_color(s) || (*s != "none" && !s.is_empty())).unwrap_or(false);
+                let c = t(ecx, ecy);
+                out.push(SymGraphic::Circle { cx: c[0], cy: c[1], r: er * S, width, fill });
+            }
+
+            // ── Ellipse → use average radius as circle ────────────────────────
+            "ELLIPSE" => {
+                if p.len() < 5 { continue; }
+                let ecx: f32 = p[1].parse().unwrap_or(0.0);
+                let ecy: f32 = p[2].parse().unwrap_or(0.0);
+                let erx: f32 = p[3].parse().unwrap_or(0.0);
+                let ery: f32 = p[4].parse().unwrap_or(0.0);
+                let width    = stroke_w(&p, 5);
+                let c = t(ecx, ecy);
+                out.push(SymGraphic::Circle { cx: c[0], cy: c[1], r: (erx + ery) * 0.5 * S, width, fill: false });
+            }
+
+            // ── Rectangle ────────────────────────────────────────────────────
+            "RECT" | "RECTANGLE" => {
+                if p.len() < 5 { continue; }
+                let ex: f32 = p[1].parse().unwrap_or(0.0);
+                let ey: f32 = p[2].parse().unwrap_or(0.0);
+                let ew: f32 = p[3].parse().unwrap_or(0.0);
+                let eh: f32 = p[4].parse().unwrap_or(0.0);
+                let width   = stroke_w(&p, 5);
+                let p0 = t(ex, ey); let p1 = t(ex + ew, ey + eh);
+                out.push(SymGraphic::Rect { x0: p0[0], y0: p0[1], x1: p1[0], y1: p1[1], width, fill: true });
+            }
+
+            // ── SVG path ─────────────────────────────────────────────────────
+            "PATH" => {
+                let d      = p.get(1).copied().unwrap_or("");
+                let width  = stroke_w(&p, 2);
+                let fill_s = p.get(4).copied().unwrap_or("none");
+                let fill   = fill_s != "none" && !fill_s.is_empty();
+                for (pts_ee, is_closed) in parse_svg_d(d) {
+                    let kpts: Vec<[f32; 2]> = pts_ee.iter().map(|(x, y)| t(*x, *y)).collect();
+                    if kpts.len() >= 2 {
+                        out.push(SymGraphic::Poly { pts: kpts, width, fill: fill && is_closed });
+                    }
+                }
+            }
+
+            // ── Generic fallback: field 1 is SVG path data or coord pairs ─────
+            _ => {
+                let data = p.get(1).copied().unwrap_or("");
+                let width = stroke_w(&p, 2);
+                let filled = is_filled(&p);
+                // If field 1 looks like an SVG path, try path parser first
+                if data.contains('M') || data.contains('L') {
+                    for (pts_ee, is_closed) in parse_svg_d(data) {
+                        let kpts: Vec<[f32; 2]> = pts_ee.iter().map(|(x, y)| t(*x, *y)).collect();
+                        if kpts.len() >= 2 {
+                            out.push(SymGraphic::Poly { pts: kpts, width, fill: filled && is_closed });
+                        }
+                    }
+                } else {
+                    // Try space/comma separated coordinate pairs
+                    let pts = pts_from_str(data);
+                    if pts.len() >= 2 {
+                        out.push(SymGraphic::Poly { pts, width, fill: filled });
+                    } else {
+                        eprintln!("[sym_graphics] unhandled shape: {kind}");
+                    }
+                }
+            }
         }
     }
     out
