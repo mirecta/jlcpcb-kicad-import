@@ -126,6 +126,29 @@ fn prop(name: &str, value: &str, at_y: f32, show: bool, _hide_name: bool) -> Str
     )
 }
 
+/// Extract the electrical value (capacitance, resistance, inductance) from component attributes.
+/// Falls back to the component's part name for ICs and other types without a simple value.
+pub fn electrical_value(c: &Component) -> String {
+    let cat = c.category.to_lowercase();
+    let keys: &[&str] = if cat.contains("capacitor") {
+        &["Capacitance"]
+    } else if cat.contains("resistor") {
+        &["Resistance"]
+    } else if cat.contains("inductor") || cat.contains("ferrite") || cat.contains("choke") {
+        &["Inductance"]
+    } else {
+        &[]
+    };
+    for key in keys {
+        if let Some(attr) = c.extra_attrs.iter().find(|a| a.name.eq_ignore_ascii_case(key)) {
+            if !attr.value.is_empty() {
+                return attr.value.clone();
+            }
+        }
+    }
+    c.value.clone()
+}
+
 pub fn ref_letter(category: &str) -> &'static str {
     let cat = category.to_lowercase();
     if cat.contains("capacitor") { return "C"; }
@@ -167,10 +190,12 @@ fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32;
       (at {} {} 0)
       (effects (font (size 1.27 1.27)))
     )"#,
-        esc(&c.value), val_pos[0], val_pos[1]
+        esc(&electrical_value(c)), val_pos[0], val_pos[1]
     ));
     y = val_pos[1] - 1.27;
     props.push(prop("Footprint", &footprint_ref, y, false, false));
+    y -= 1.27;
+    props.push(prop("Part Name", &c.value, y, false, false));
     y -= 1.27;
     props.push(prop("Datasheet", &c.datasheet, y, false, false));
     y -= 1.27;

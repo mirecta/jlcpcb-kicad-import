@@ -796,7 +796,7 @@ impl eframe::App for App {
                             &mut cols[0],
                             &comp.pins,
                             &comp.sym_graphics,
-                            &comp.value,
+                            &export::electrical_value(&comp),
                             export::ref_letter(&comp.category),
                             self.state.ref_pos,
                             self.state.val_pos,
