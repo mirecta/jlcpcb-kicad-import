@@ -1166,7 +1166,12 @@ fn sample_arc_3pt(p0: egui::Pos2, pm: egui::Pos2, p1: egui::Pos2, n: usize) -> V
     };
     while dt >  std::f32::consts::PI { dt -= 2.0 * std::f32::consts::PI; }
     while dt < -std::f32::consts::PI { dt += 2.0 * std::f32::consts::PI; }
-    if dt.signum() != dtm.signum() { dt = -dt; while dt > std::f32::consts::PI { dt -= 2.0*std::f32::consts::PI; } while dt < -std::f32::consts::PI { dt += 2.0*std::f32::consts::PI; } }
+    // If dt has the wrong sign, add/subtract 2π to keep the magnitude but change direction.
+    // Negating dt gives the wrong arc length when the arc crosses the 0°/360° boundary.
+    if dt.signum() != dtm.signum() {
+        if dtm > 0.0 { dt += 2.0 * std::f32::consts::PI; }
+        else          { dt -= 2.0 * std::f32::consts::PI; }
+    }
     (0..=n).map(|i| {
         let t = theta0 + dt * i as f32 / n as f32;
         egui::pos2(ux + r * t.cos(), uy + r * t.sin())
@@ -1290,30 +1295,21 @@ fn show_symbol_preview(
     } else {
         // Draw EasyEDA-derived graphical elements
         let body_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(136, 0, 0));
-        let mut prev_arc_end: Option<egui::Pos2> = None;
         for g in graphics {
             match g {
                 api::SymGraphic::Arc { start, mid, end, .. } => {
                     let ps = ts(start[0], start[1]);
                     let pm = ts(mid[0],   mid[1]);
                     let pe = ts(end[0],   end[1]);
-                    // Fill the small gap between this arc's start and the previous arc's end
-                    if let Some(prev) = prev_arc_end {
-                        if (prev - ps).length() < 12.0 {
-                            painter.line_segment([prev, ps], body_stroke);
-                        }
-                    }
-                    let pts = sample_arc_3pt(ps, pm, pe, 24);
+                    let pts = sample_arc_3pt(ps, pm, pe, 32);
                     painter.add(egui::Shape::Path(egui::epaint::PathShape {
                         points: pts,
                         closed: false,
                         fill: egui::Color32::TRANSPARENT,
                         stroke: egui::epaint::PathStroke::new(1.5, egui::Color32::from_rgb(136, 0, 0)),
                     }));
-                    prev_arc_end = Some(pe);
                 }
                 api::SymGraphic::Poly { pts, .. } => {
-                    prev_arc_end = None;
                     if pts.len() >= 2 {
                         let spts: Vec<egui::Pos2> = pts.iter().map(|p| ts(p[0], p[1])).collect();
                         for w in spts.windows(2) {
@@ -1322,11 +1318,9 @@ fn show_symbol_preview(
                     }
                 }
                 api::SymGraphic::Circle { cx, cy, r, .. } => {
-                    prev_arc_end = None;
                     painter.circle_stroke(ts(*cx, *cy), r * scale, body_stroke);
                 }
                 api::SymGraphic::Rect { x0, y0, x1, y1, fill, .. } => {
-                    prev_arc_end = None;
                     painter.rect(
                         egui::Rect::from_two_pos(ts(*x0, *y0), ts(*x1, *y1)),
                         0.0,
