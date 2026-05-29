@@ -192,6 +192,7 @@ impl App {
         state.import_symbol = true;
         state.import_footprint = true;
         state.import_package = true;
+        state.hide_pin_numbers = true;
         App { state }
     }
 
