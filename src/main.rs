@@ -701,6 +701,27 @@ impl eframe::App for App {
                 ui.label(egui::RichText::new(&comp.description).italics());
                 ui.add_space(8.0);
 
+                // Helper: DragValue that also responds to scroll wheel
+                let scrollable_drag_helper = |ui: &mut egui::Ui, value: &mut f32, speed: f32, scroll_mult: f32, range: Option<std::ops::RangeInclusive<f32>>| {
+                    let mut drag = egui::DragValue::new(value).speed(speed);
+                    if let Some(ref r) = range { drag = drag.range(r.clone()); }
+                    let response = ui.add(drag);
+                    if response.hovered() {
+                        let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
+                        if scroll_delta.abs() > 0.1 {
+                            *value += scroll_delta * scroll_mult;
+                            if let Some(ref r) = range {
+                                *value = value.clamp(*r.start(), *r.end());
+                            }
+                            ui.input_mut(|i| {
+                                i.smooth_scroll_delta = egui::Vec2::ZERO;
+                                i.raw_scroll_delta    = egui::Vec2::ZERO;
+                            });
+                        }
+                    }
+                    response
+                };
+
                 ui.columns(2, |cols| {
                     // Left: previews (interactive pan/zoom)
                     if !comp.pins.is_empty() {
@@ -792,52 +813,24 @@ impl eframe::App for App {
                                 });
                         }
                     }
-                });
 
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(4.0);
-
-                // Helper function to create DragValue that responds to scroll wheel
-                let scrollable_drag_helper = |ui: &mut egui::Ui, value: &mut f32, speed: f32, scroll_mult: f32, range: Option<std::ops::RangeInclusive<f32>>| {
-                    let mut drag = egui::DragValue::new(value).speed(speed);
-                    if let Some(ref r) = range {
-                        drag = drag.range(r.clone());
-                    }
-                    let response = ui.add(drag);
-
-                    // If hovering over this widget, consume scroll and change value
-                    if response.hovered() {
-                        let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
-                        if scroll_delta.abs() > 0.1 {
-                            *value += scroll_delta * scroll_mult;
-                            if let Some(ref r) = range {
-                                *value = value.clamp(*r.start(), *r.end());
-                            }
-                            ui.input_mut(|i| {
-                                i.smooth_scroll_delta = egui::Vec2::ZERO;
-                                i.raw_scroll_delta = egui::Vec2::ZERO;
-                            });
-                        }
-                    }
-                    response
-                };
-
-                // Symbol text position
-                ui.label(egui::RichText::new("Symbol Text Positions (mm)").strong());
-                egui::Grid::new("sym_adj").spacing([8.0, 4.0]).show(ui, |ui| {
-                    ui.label("Reference X:");
-                    scrollable_drag_helper(ui, &mut self.state.ref_pos[0], 0.1, 0.0025, None);
-                    ui.label("Y:");
-                    scrollable_drag_helper(ui, &mut self.state.ref_pos[1], 0.1, 0.0025, None);
-                    if ui.button("Reset").clicked() { self.state.ref_pos = [0.0, 3.81]; }
-                    ui.end_row();
-                    ui.label("Value X:");
-                    scrollable_drag_helper(ui, &mut self.state.val_pos[0], 0.1, 0.0025, None);
-                    ui.label("Y:");
-                    scrollable_drag_helper(ui, &mut self.state.val_pos[1], 0.1, 0.0025, None);
-                    if ui.button("Reset").clicked() { self.state.val_pos = [0.0, 2.54]; }
-                    ui.end_row();
+                    cols[1].add_space(8.0);
+                    cols[1].separator();
+                    cols[1].label(egui::RichText::new("Symbol Text Positions (mm)").strong());
+                    egui::Grid::new("sym_adj").spacing([8.0, 4.0]).show(&mut cols[1], |ui| {
+                        ui.label("Reference X:");
+                        scrollable_drag_helper(ui, &mut self.state.ref_pos[0], 0.1, 0.0025, None);
+                        ui.label("Y:");
+                        scrollable_drag_helper(ui, &mut self.state.ref_pos[1], 0.1, 0.0025, None);
+                        if ui.button("Reset").clicked() { self.state.ref_pos = [0.0, 3.81]; }
+                        ui.end_row();
+                        ui.label("Value X:");
+                        scrollable_drag_helper(ui, &mut self.state.val_pos[0], 0.1, 0.0025, None);
+                        ui.label("Y:");
+                        scrollable_drag_helper(ui, &mut self.state.val_pos[1], 0.1, 0.0025, None);
+                        if ui.button("Reset").clicked() { self.state.val_pos = [0.0, 2.54]; }
+                        ui.end_row();
+                    });
                 });
 
                 ui.add_space(4.0);
