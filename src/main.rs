@@ -714,12 +714,12 @@ impl eframe::App for App {
                             self.state.ref_pos,
                             self.state.val_pos,
                             &mut self.state.sym_pz,
-                            egui::Vec2::new(360.0, 300.0),
+                            egui::Vec2::new(460.0, 380.0),
                         );
                     } else if let Some(tex) = &self.state.symbol_texture {
                         // No pin data — show EasyEDA SVG as fallback
                         cols[0].label(egui::RichText::new("Symbol  (EasyEDA SVG — no pin data)").strong());
-                        let rect = show_panzoom_image(&mut cols[0], tex, egui::Vec2::new(360.0, 300.0), &mut self.state.sym_pz, "sym");
+                        let rect = show_panzoom_image(&mut cols[0], tex, egui::Vec2::new(460.0, 380.0), &mut self.state.sym_pz, "sym");
                         let painter = cols[0].painter().with_clip_rect(rect);
                         let lbl_font  = egui::FontId::proportional(13.0);
                         let lbl_color = egui::Color32::from_rgb(0, 0, 200);
@@ -731,7 +731,7 @@ impl eframe::App for App {
                     cols[0].add_space(8.0);
                     cols[0].label(egui::RichText::new("Footprint  (drag: pan  scroll: zoom)").strong());
                     if let Some(tex) = &self.state.footprint_texture {
-                        show_panzoom_image(&mut cols[0], tex, egui::Vec2::new(320.0, 220.0), &mut self.state.fp_pz, "fp");
+                        show_panzoom_image(&mut cols[0], tex, egui::Vec2::new(460.0, 320.0), &mut self.state.fp_pz, "fp");
                     } else {
                         cols[0].label("(no preview)");
                     }
