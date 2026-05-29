@@ -705,42 +705,30 @@ impl eframe::App for App {
 
                 ui.columns(2, |cols| {
                     // Left: previews (interactive pan/zoom)
-                    if let Some(tex) = &self.state.symbol_texture {
-                        // Prefer EasyEDA SVG when available — shows correct component shape
-                        cols[0].label(egui::RichText::new("Symbol  (drag: pan  scroll: zoom)").strong());
-                        let rect = show_panzoom_image(&mut cols[0], tex, egui::Vec2::new(360.0, 300.0), &mut self.state.sym_pz, "sym");
-                        let painter = cols[0].painter().with_clip_rect(rect);
-                        let lbl_font  = egui::FontId::proportional(13.0);
-                        let lbl_color = egui::Color32::from_rgb(0, 0, 200);
-                        painter.text(
-                            rect.center_top() + egui::vec2(0.0, 6.0),
-                            egui::Align2::CENTER_TOP,
-                            "U?",
-                            lbl_font.clone(),
-                            lbl_color,
-                        );
-                        painter.text(
-                            rect.center_bottom() + egui::vec2(0.0, -6.0),
-                            egui::Align2::CENTER_BOTTOM,
-                            &comp.value,
-                            lbl_font,
-                            lbl_color,
-                        );
-                    } else if !comp.pins.is_empty() {
-                        // Fallback: auto-generated KiCad symbol from pin data
+                    if !comp.pins.is_empty() {
+                        // KiCad-style symbol with movable ref/val labels
                         cols[0].label(egui::RichText::new("Symbol  (drag: pan  scroll: zoom)").strong());
                         show_symbol_preview(
                             &mut cols[0],
                             &comp.pins,
+                            &comp.sym_graphics,
                             &comp.value,
                             self.state.ref_pos,
                             self.state.val_pos,
                             &mut self.state.sym_pz,
                             egui::Vec2::new(360.0, 300.0),
                         );
+                    } else if let Some(tex) = &self.state.symbol_texture {
+                        // No pin data — show EasyEDA SVG as fallback
+                        cols[0].label(egui::RichText::new("Symbol  (EasyEDA SVG — no pin data)").strong());
+                        let rect = show_panzoom_image(&mut cols[0], tex, egui::Vec2::new(360.0, 300.0), &mut self.state.sym_pz, "sym");
+                        let painter = cols[0].painter().with_clip_rect(rect);
+                        let lbl_font  = egui::FontId::proportional(13.0);
+                        let lbl_color = egui::Color32::from_rgb(0, 0, 200);
+                        painter.text(rect.center_top() + egui::vec2(0.0, 6.0), egui::Align2::CENTER_TOP, "U?", lbl_font.clone(), lbl_color);
+                        painter.text(rect.center_bottom() + egui::vec2(0.0, -6.0), egui::Align2::CENTER_BOTTOM, &comp.value, lbl_font, lbl_color);
                     } else {
                         cols[0].label(egui::RichText::new("Symbol  (no data)").strong());
-                        cols[0].label("(no symbol data available)");
                     }
                     cols[0].add_space(8.0);
                     cols[0].label(egui::RichText::new("Footprint  (drag: pan  scroll: zoom)").strong());
@@ -1153,9 +1141,44 @@ impl eframe::App for App {
     }
 }
 
+/// Fit a circle through 3 screen points, sample N+1 arc points between them.
+fn sample_arc_3pt(p0: egui::Pos2, pm: egui::Pos2, p1: egui::Pos2, n: usize) -> Vec<egui::Pos2> {
+    // Circumcircle of (p0, pm, p1)
+    let ax = p0.x; let ay = p0.y;
+    let bx = pm.x; let by = pm.y;
+    let cx = p1.x; let cy = p1.y;
+    let d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    if d.abs() < 1e-6 {
+        // Degenerate — return straight line
+        return vec![p0, pm, p1];
+    }
+    let ux = ((ax*ax+ay*ay)*(by-cy) + (bx*bx+by*by)*(cy-ay) + (cx*cx+cy*cy)*(ay-by)) / d;
+    let uy = ((ax*ax+ay*ay)*(cx-bx) + (bx*bx+by*by)*(ax-cx) + (cx*cx+cy*cy)*(bx-ax)) / d;
+    let r = ((ax-ux)*(ax-ux)+(ay-uy)*(ay-uy)).sqrt();
+    let theta0 = (ay - uy).atan2(ax - ux);
+    let thetam = (by - uy).atan2(bx - ux);
+    let theta1 = (cy - uy).atan2(cx - ux);
+    // Determine angular direction (through pm)
+    let mut dt = theta1 - theta0;
+    let dtm = {
+        let mut d = thetam - theta0;
+        while d >  std::f32::consts::PI { d -= 2.0 * std::f32::consts::PI; }
+        while d < -std::f32::consts::PI { d += 2.0 * std::f32::consts::PI; }
+        d
+    };
+    while dt >  std::f32::consts::PI { dt -= 2.0 * std::f32::consts::PI; }
+    while dt < -std::f32::consts::PI { dt += 2.0 * std::f32::consts::PI; }
+    if dt.signum() != dtm.signum() { dt = -dt; while dt > std::f32::consts::PI { dt -= 2.0*std::f32::consts::PI; } while dt < -std::f32::consts::PI { dt += 2.0*std::f32::consts::PI; } }
+    (0..=n).map(|i| {
+        let t = theta0 + dt * i as f32 / n as f32;
+        egui::pos2(ux + r * t.cos(), uy + r * t.sin())
+    }).collect()
+}
+
 fn show_symbol_preview(
     ui: &mut egui::Ui,
     pins: &[Pin],
+    graphics: &[api::SymGraphic],
     value: &str,
     ref_pos: [f32; 2],
     val_pos: [f32; 2],
@@ -1242,14 +1265,57 @@ fn show_symbol_preview(
         center.y - (my - cy_mm) * scale,
     );
 
-    // Body rectangle — light yellow fill, dark red border
-    painter.rect(
-        egui::Rect::from_two_pos(ts(bmin_x, bmax_y), ts(bmax_x, bmin_y)),
-        0.0,
-        egui::Color32::from_rgb(255, 255, 204),
-        egui::Stroke::new(1.5, egui::Color32::from_rgb(160, 0, 0)),
-        egui::StrokeKind::Middle,
-    );
+    if graphics.is_empty() {
+        // Auto-generated rectangle body — light yellow fill, dark red border
+        painter.rect(
+            egui::Rect::from_two_pos(ts(bmin_x, bmax_y), ts(bmax_x, bmin_y)),
+            0.0,
+            egui::Color32::from_rgb(255, 255, 204),
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(160, 0, 0)),
+            egui::StrokeKind::Middle,
+        );
+    } else {
+        // Draw EasyEDA-derived graphical elements
+        let body_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(136, 0, 0));
+        for g in graphics {
+            match g {
+                api::SymGraphic::Arc { start, mid, end, .. } => {
+                    // Approximate arc as a polyline through ~24 sampled points
+                    let ps = ts(start[0], start[1]);
+                    let pm = ts(mid[0],   mid[1]);
+                    let pe = ts(end[0],   end[1]);
+                    // Fit a circle through the 3 screen points and sample it
+                    let pts = sample_arc_3pt(ps, pm, pe, 24);
+                    painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                        points: pts,
+                        closed: false,
+                        fill: egui::Color32::TRANSPARENT,
+                        stroke: egui::epaint::PathStroke::new(1.5, egui::Color32::from_rgb(136, 0, 0)),
+                    }));
+                }
+                api::SymGraphic::Poly { pts, .. } => {
+                    if pts.len() >= 2 {
+                        let spts: Vec<egui::Pos2> = pts.iter().map(|p| ts(p[0], p[1])).collect();
+                        for w in spts.windows(2) {
+                            painter.line_segment([w[0], w[1]], body_stroke);
+                        }
+                    }
+                }
+                api::SymGraphic::Circle { cx, cy, r, .. } => {
+                    painter.circle_stroke(ts(*cx, *cy), r * scale, body_stroke);
+                }
+                api::SymGraphic::Rect { x0, y0, x1, y1, fill, .. } => {
+                    painter.rect(
+                        egui::Rect::from_two_pos(ts(*x0, *y0), ts(*x1, *y1)),
+                        0.0,
+                        if *fill { egui::Color32::from_rgb(255, 255, 204) } else { egui::Color32::TRANSPARENT },
+                        body_stroke,
+                        egui::StrokeKind::Middle,
+                    );
+                }
+            }
+        }
+    }
 
     // Pins
     let font_sz = (scale * 1.27).clamp(8.0, 14.0);

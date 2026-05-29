@@ -59,6 +59,16 @@ pub struct Pad {
     pub drill:  f32,    // 0 = SMD, >0 = through-hole drill diameter in mm
 }
 
+/// Graphical element extracted from EasyEDA schematic data for KiCad symbol body
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SymGraphic {
+    Arc     { start: [f32; 2], mid: [f32; 2], end: [f32; 2], width: f32 },
+    Poly    { pts: Vec<[f32; 2]>, width: f32, fill: bool },
+    Circle  { cx: f32, cy: f32, r: f32, width: f32, fill: bool },
+    Rect    { x0: f32, y0: f32, x1: f32, y1: f32, width: f32, fill: bool },
+}
+
 /// One pin extracted from EasyEDA schematic shape data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pin {
@@ -99,6 +109,7 @@ pub struct Component {
     // Initial 3D model placement from EasyEDA SVGNODE data (mm / degrees)
     pub model_init_offset:   [f32; 3],
     pub model_init_rotation: [f32; 3],
+    pub sym_graphics: Vec<SymGraphic>,
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -273,6 +284,7 @@ pub fn fetch_component(lcsc_id: &str) -> Result<Component> {
     let model_init_rotation = model_info.as_ref().map(|m| m.rotation).unwrap_or([0.0; 3]);
 
     let pins = extract_pins(&easyeda);
+    let sym_graphics = extract_sym_graphics(&easyeda);
     let pads = extract_pads(&easyeda);
     let fp_drawings = extract_fp_drawings(&easyeda);
     let fp_graphics = extract_fp_graphics(&easyeda);
@@ -303,6 +315,7 @@ pub fn fetch_component(lcsc_id: &str) -> Result<Component> {
         fp_graphics,
         model_init_offset,
         model_init_rotation,
+        sym_graphics,
     })
 }
 
@@ -427,6 +440,146 @@ fn extract_pins(easyeda: &serde_json::Value) -> Vec<Pin> {
         y: -(y - cy) * SCALE,
         angle,
     }).collect()
+}
+
+// ── EasyEDA schematic graphic extraction ──────────────────────────────────────
+
+/// Return the centroid of all pin positions in EasyEDA units (used to centre graphics).
+fn ee_pin_centroid(shapes: &[serde_json::Value]) -> (f32, f32) {
+    let mut xs: Vec<f32> = Vec::new();
+    let mut ys: Vec<f32> = Vec::new();
+    for shape in shapes {
+        let s = match shape.as_str() { Some(s) => s, None => continue };
+        if s.starts_with("PIN~") {
+            let p: Vec<&str> = s.split('~').collect();
+            if p.len() >= 3 {
+                if let (Ok(x), Ok(y)) = (p[1].parse::<f32>(), p[2].parse::<f32>()) {
+                    xs.push(x); ys.push(y);
+                }
+            }
+        } else if s.starts_with("P~") {
+            let p0: Vec<&str> = s.split("^^").next().unwrap_or("").split('~').collect();
+            if p0.len() >= 6 {
+                if let (Ok(x), Ok(y)) = (p0[4].parse::<f32>(), p0[5].parse::<f32>()) {
+                    xs.push(x); ys.push(y);
+                }
+            }
+        }
+    }
+    if xs.is_empty() { return (0.0, 0.0); }
+    let cx = xs.iter().sum::<f32>() / xs.len() as f32;
+    let cy = ys.iter().sum::<f32>() / ys.len() as f32;
+    (cx, cy)
+}
+
+/// SVG arc endpoint parameterisation → midpoint on the arc (EasyEDA coordinates).
+fn svg_arc_mid(x1: f32, y1: f32, mut rx: f32, mut ry: f32, f_a: bool, f_s: bool, x2: f32, y2: f32) -> [f32; 2] {
+    use std::f32::consts::PI;
+    let dx2 = (x1 - x2) / 2.0;
+    let dy2 = (y1 - y2) / 2.0;
+    // phi=0 so x1'=dx2, y1'=dy2
+    let x1p = dx2; let y1p = dy2;
+    let x1p2 = x1p * x1p; let y1p2 = y1p * y1p;
+    let lambda = (x1p2 / (rx * rx) + y1p2 / (ry * ry)).sqrt();
+    if lambda > 1.0 { rx *= lambda; ry *= lambda; }
+    let rx2 = rx * rx; let ry2 = ry * ry;
+    let sign = if f_a == f_s { -1.0_f32 } else { 1.0_f32 };
+    let sq = ((rx2 * ry2 - rx2 * y1p2 - ry2 * x1p2) / (rx2 * y1p2 + ry2 * x1p2).max(1e-9)).max(0.0).sqrt();
+    let cxp = sign * sq *  rx * y1p / ry;
+    let cyp = sign * sq * -ry * x1p / rx;
+    let cx = cxp + (x1 + x2) / 2.0;
+    let cy = cyp + (y1 + y2) / 2.0;
+    // angles
+    let va = |ux: f32, uy: f32, vx: f32, vy: f32| -> f32 {
+        let n = ((ux*ux+uy*uy)*(vx*vx+vy*vy)).sqrt().max(1e-9);
+        let mut a = ((ux*vx+uy*vy)/n).clamp(-1.0,1.0).acos();
+        if ux*vy - uy*vx < 0.0 { a = -a; }
+        a
+    };
+    let ux = (x1p - cxp) / rx; let uy = (y1p - cyp) / ry;
+    let vx = (-x1p - cxp) / rx; let vy = (-y1p - cyp) / ry;
+    let theta1 = va(1.0, 0.0, ux, uy);
+    let mut dtheta = va(ux, uy, vx, vy);
+    if  f_s && dtheta < 0.0 { dtheta += 2.0 * PI; }
+    if !f_s && dtheta > 0.0 { dtheta -= 2.0 * PI; }
+    let mt = theta1 + dtheta / 2.0;
+    [cx + rx * mt.cos(), cy + ry * mt.sin()]
+}
+
+/// Parse "M x y A rx ry xrot fa fs x2 y2" from an EasyEDA A~ path string.
+fn parse_ee_arc(path: &str) -> Option<([f32;2], f32, f32, bool, bool, [f32;2])> {
+    let t: Vec<&str> = path.split_whitespace().collect();
+    let mi = t.iter().position(|s| *s == "M")?;
+    let ai = t.iter().position(|s| *s == "A")?;
+    if ai < mi + 3 || t.len() < ai + 8 { return None; }
+    Some(([t[mi+1].parse().ok()?, t[mi+2].parse().ok()?],
+          t[ai+1].parse().ok()?, t[ai+2].parse().ok()?,
+          t[ai+4].parse::<u8>().ok()? != 0, t[ai+5].parse::<u8>().ok()? != 0,
+          [t[ai+6].parse().ok()?, t[ai+7].parse().ok()?]))
+}
+
+fn extract_sym_graphics(easyeda: &serde_json::Value) -> Vec<SymGraphic> {
+    let shapes = ee_shape_array(easyeda);
+    if shapes.is_empty() { return vec![]; }
+    let (cx, cy) = ee_pin_centroid(&shapes);
+    const S: f32 = 0.254; // EasyEDA unit → mm
+
+    // Transform: centre + Y-flip + scale
+    let t = |ex: f32, ey: f32| -> [f32; 2] { [(ex - cx) * S, -(ey - cy) * S] };
+
+    let mut out: Vec<SymGraphic> = Vec::new();
+
+    for shape in &shapes {
+        let s = match shape.as_str() { Some(s) => s, None => continue };
+
+        if s.starts_with("A~") || s.starts_with("ARC~") {
+            // A~<svgpath>~~color~width~...
+            let p: Vec<&str> = s.splitn(10, '~').collect();
+            let path  = p.get(1).unwrap_or(&"");
+            let width = p.get(4).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0) * S;
+            if let Some(([x1,y1], rx, ry, fa, fs, [x2,y2])) = parse_ee_arc(path) {
+                let mid = svg_arc_mid(x1, y1, rx, ry, fa, fs, x2, y2);
+                out.push(SymGraphic::Arc {
+                    start: t(x1, y1), mid: t(mid[0], mid[1]), end: t(x2, y2), width,
+                });
+            }
+
+        } else if s.starts_with("POLYLINE~") || s.starts_with("LINE~") {
+            // POLYLINE~x1 y1 x2 y2 ...~width~...
+            let p: Vec<&str> = s.splitn(5, '~').collect();
+            let pts_str = p.get(1).unwrap_or(&"");
+            let width = p.get(2).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0) * S;
+            let nums: Vec<f32> = pts_str.split(|c: char| c.is_whitespace() || c == ',')
+                .filter_map(|s| s.parse().ok()).collect();
+            let pts: Vec<[f32;2]> = nums.chunks_exact(2).map(|c| t(c[0], c[1])).collect();
+            if pts.len() >= 2 { out.push(SymGraphic::Poly { pts, width, fill: false }); }
+
+        } else if s.starts_with("CIRCLE~") {
+            // CIRCLE~cx~cy~r~...~width~fillColor~...
+            let p: Vec<&str> = s.split('~').collect();
+            if p.len() < 4 { continue; }
+            let ecx: f32 = p[1].parse().unwrap_or(0.0);
+            let ecy: f32 = p[2].parse().unwrap_or(0.0);
+            let er:  f32 = p[3].parse().unwrap_or(0.0);
+            let width = p.get(5).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0) * S;
+            let fill  = p.get(6).map(|s| *s != "none" && !s.is_empty()).unwrap_or(false);
+            let c = t(ecx, ecy);
+            out.push(SymGraphic::Circle { cx: c[0], cy: c[1], r: er * S, width, fill });
+
+        } else if s.starts_with("RECT~") {
+            // RECT~x~y~width~height~...~strokeWidth~...
+            let p: Vec<&str> = s.split('~').collect();
+            if p.len() < 5 { continue; }
+            let ex: f32 = p[1].parse().unwrap_or(0.0);
+            let ey: f32 = p[2].parse().unwrap_or(0.0);
+            let ew: f32 = p[3].parse().unwrap_or(0.0);
+            let eh: f32 = p[4].parse().unwrap_or(0.0);
+            let width = p.get(7).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0) * S;
+            let p0 = t(ex, ey); let p1 = t(ex + ew, ey + eh);
+            out.push(SymGraphic::Rect { x0: p0[0], y0: p0[1], x1: p1[0], y1: p1[1], width, fill: true });
+        }
+    }
+    out
 }
 
 fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {

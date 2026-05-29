@@ -1,4 +1,4 @@
-use crate::api::{Component, FpGraphic, Pin};
+use crate::api::{Component, FpGraphic, Pin, SymGraphic};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -185,7 +185,7 @@ fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32;
     let props_str = props.join("\n");
     let sym_name = &name;
 
-    let body = build_symbol_body(sym_name, &c.pins);
+    let body = build_symbol_body(sym_name, &c.pins, &c.sym_graphics);
 
     format!(
         "  (symbol \"{sym_name}\"\n    (pin_names (offset 1.016))\n    (in_bom yes) (on_board yes)\n{props_str}\n{body}\n  )"
@@ -194,40 +194,72 @@ fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32;
 
 const PIN_LEN: f32 = 2.54;
 
-fn build_symbol_body(sym_name: &str, pins: &[Pin]) -> String {
-    if pins.is_empty() {
-        return format!(
-            "    (symbol \"{sym_name}_0_1\"\n      (rectangle (start -5.08 1.27) (end 5.08 -1.27)\n        (stroke (width 0.254) (type default))\n        (fill (type background))\n      )\n    )"
-        );
+fn build_symbol_body(sym_name: &str, pins: &[Pin], graphics: &[SymGraphic]) -> String {
+    let mut out = format!("    (symbol \"{sym_name}_0_1\"\n");
+
+    if graphics.is_empty() {
+        // Auto-generate rectangle body from pin endpoints
+        let (rx0, ry0, rx1, ry1) = if pins.is_empty() {
+            (-5.08_f32, 1.27, 5.08, -1.27)
+        } else {
+            let pts: Vec<(f32, f32)> = pins.iter().map(|p| body_end(p)).collect();
+            let m = 0.5_f32;
+            (pts.iter().map(|(x,_)| *x).fold(f32::MAX, f32::min) - m,
+             pts.iter().map(|(_,y)| *y).fold(f32::MIN, f32::max) + m,
+             pts.iter().map(|(x,_)| *x).fold(f32::MIN, f32::max) + m,
+             pts.iter().map(|(_,y)| *y).fold(f32::MAX, f32::min) - m)
+        };
+        out.push_str(&format!(
+            "      (rectangle (start {:.3} {:.3}) (end {:.3} {:.3})\n        (stroke (width 0.254) (type default))\n        (fill (type background))\n      )\n",
+            rx0, ry0, rx1, ry1,
+        ));
+    } else {
+        // Emit EasyEDA-derived graphical elements
+        for g in graphics {
+            match g {
+                SymGraphic::Arc { start, mid, end, width } => {
+                    out.push_str(&format!(
+                        "      (arc (start {:.3} {:.3}) (mid {:.3} {:.3}) (end {:.3} {:.3})\n        (stroke (width {:.3}) (type default))\n        (fill (type none))\n      )\n",
+                        start[0], start[1], mid[0], mid[1], end[0], end[1], width
+                    ));
+                }
+                SymGraphic::Poly { pts, width, fill } => {
+                    let pts_str: String = pts.iter()
+                        .map(|p| format!("(xy {:.3} {:.3})", p[0], p[1]))
+                        .collect::<Vec<_>>().join(" ");
+                    let fill_str = if *fill { "outline" } else { "none" };
+                    out.push_str(&format!(
+                        "      (polyline (pts {pts_str})\n        (stroke (width {:.3}) (type default))\n        (fill (type {fill_str}))\n      )\n",
+                        width
+                    ));
+                }
+                SymGraphic::Circle { cx, cy, r, width, fill } => {
+                    let fill_str = if *fill { "outline" } else { "none" };
+                    out.push_str(&format!(
+                        "      (circle (center {:.3} {:.3}) (radius {:.3})\n        (stroke (width {:.3}) (type default))\n        (fill (type {fill_str}))\n      )\n",
+                        cx, cy, r, width
+                    ));
+                }
+                SymGraphic::Rect { x0, y0, x1, y1, width, fill } => {
+                    let fill_str = if *fill { "background" } else { "none" };
+                    out.push_str(&format!(
+                        "      (rectangle (start {:.3} {:.3}) (end {:.3} {:.3})\n        (stroke (width {:.3}) (type default))\n        (fill (type {fill_str}))\n      )\n",
+                        x0, y0, x1, y1, width
+                    ));
+                }
+            }
+        }
     }
 
-    // Compute bounding box of body-side endpoints
-    let body_pts: Vec<(f32, f32)> = pins.iter().map(|p| body_end(p)).collect();
-    let min_x = body_pts.iter().map(|(x, _)| *x).fold(f32::MAX, f32::min);
-    let max_x = body_pts.iter().map(|(x, _)| *x).fold(f32::MIN, f32::max);
-    let min_y = body_pts.iter().map(|(_, y)| *y).fold(f32::MAX, f32::min);
-    let max_y = body_pts.iter().map(|(_, y)| *y).fold(f32::MIN, f32::max);
-
-    // Add a small margin so the rectangle edge doesn't touch the pin line
-    let margin = 0.5_f32;
-    let (rx0, ry0) = (min_x - margin, max_y + margin); // top-left
-    let (rx1, ry1) = (max_x + margin, min_y - margin); // bottom-right
-
-    let mut out = format!(
-        "    (symbol \"{sym_name}_0_1\"\n      (rectangle (start {rx0:.3} {ry0:.3}) (end {rx1:.3} {ry1:.3})\n        (stroke (width 0.254) (type default))\n        (fill (type background))\n      )\n"
-    );
-
     for pin in pins {
-        let name_esc = esc_pin(&pin.name);
-        let num_esc  = esc_pin(&pin.number);
         out.push_str(&format!(
             "      (pin {ptype} line\n        (at {x:.3} {y:.3} {angle})\n        (length {PIN_LEN:.3})\n        (name \"{name}\" (effects (font (size 1.27 1.27))))\n        (number \"{num}\" (effects (font (size 1.27 1.27))))\n      )\n",
             ptype  = pin.pin_type,
             x      = pin.x,
             y      = pin.y,
             angle  = pin.angle,
-            name   = name_esc,
-            num    = num_esc,
+            name   = esc_pin(&pin.name),
+            num    = esc_pin(&pin.number),
         ));
     }
 
