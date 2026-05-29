@@ -143,6 +143,9 @@ struct AppState {
 
     bg_rx: Option<std::sync::mpsc::Receiver<BgMsg>>,
 
+    // Clipboard paste (threaded to avoid Wayland event-loop deadlock)
+    pending_paste: Option<std::sync::mpsc::Receiver<String>>,
+
     // Icon state
     icon_set: bool,
 }
@@ -298,6 +301,20 @@ impl eframe::App for App {
         }
 
         // Handle deferred row click from inside table closure
+        // Drain pending clipboard paste (read on background thread to avoid Wayland deadlock)
+        if let Some(rx) = &self.state.pending_paste {
+            match rx.try_recv() {
+                Ok(text) => {
+                    self.state.search_input = text;
+                    self.state.pending_paste = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(10));
+                }
+                Err(_) => { self.state.pending_paste = None; }
+            }
+        }
+
         if let Some(i) = self.state.pending_select.take() {
             if self.state.selected_idx != Some(i) {
                 self.state.selected_idx = Some(i);
@@ -474,11 +491,15 @@ impl eframe::App for App {
                         ui.close_menu();
                     }
                     if ui.button("Paste").clicked() {
-                        if let Ok(mut cb) = arboard::Clipboard::new() {
-                            if let Ok(text) = cb.get_text() {
-                                self.state.search_input = text;
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        self.state.pending_paste = Some(rx);
+                        std::thread::spawn(move || {
+                            if let Ok(mut cb) = arboard::Clipboard::new() {
+                                if let Ok(text) = cb.get_text() {
+                                    let _ = tx.send(text);
+                                }
                             }
-                        }
+                        });
                         ui.close_menu();
                     }
                 });
