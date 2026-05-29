@@ -1234,7 +1234,7 @@ fn show_symbol_preview(
         )
     };
 
-    // Full extents for auto-fit (body + pin tips + label positions)
+    // Full extents for auto-fit (body + pin tips + label positions + graphics)
     let label_pad = (value.len() as f32 * 0.9).max(5.0);
     let mut min_x = bmin_x.min(ref_pos[0] - 2.0).min(val_pos[0] - 2.0);
     let mut max_x = bmax_x.max(ref_pos[0] + label_pad).max(val_pos[0] + label_pad);
@@ -1245,6 +1245,21 @@ fn show_symbol_preview(
         max_x = max_x.max(p.x + PIN_LEN + 0.5);
         min_y = min_y.min(p.y - PIN_LEN - 0.5);
         max_y = max_y.max(p.y + PIN_LEN + 0.5);
+    }
+    // Extend auto-fit to cover graphical elements (arcs, circles, etc.)
+    for g in graphics {
+        let pts: Vec<[f32; 2]> = match g {
+            api::SymGraphic::Arc { start, mid, end, .. } => vec![*start, *mid, *end],
+            api::SymGraphic::Poly { pts, .. } => pts.clone(),
+            api::SymGraphic::Circle { cx, cy, r, .. } =>
+                vec![[cx - r, *cy], [cx + r, *cy], [*cx, cy - r], [*cx, cy + r]],
+            api::SymGraphic::Rect { x0, y0, x1, y1, .. } =>
+                vec![[*x0, *y0], [*x1, *y1]],
+        };
+        for p in pts {
+            min_x = min_x.min(p[0]); max_x = max_x.max(p[0]);
+            min_y = min_y.min(p[1]); max_y = max_y.max(p[1]);
+        }
     }
     min_x -= 2.0; max_x += 2.0; min_y -= 2.0; max_y += 2.0;
 
@@ -1321,25 +1336,36 @@ fn show_symbol_preview(
     let name_col = egui::Color32::from_rgb(0, 0, 160);
     let num_col  = egui::Color32::from_rgb(130, 0, 0);
 
+    // When custom graphics are present, pin stubs are short (just the EasyEDA wire stub,
+    // ~3 units = 0.76mm). The graphic shapes (arcs etc.) cover the body region.
+    let stub_len = if graphics.is_empty() { PIN_LEN } else { 3.0 * 0.254_f32 };
+
     for pin in pins {
-        let tip      = ts(pin.x, pin.y);
-        let (bx, by) = body_end(pin);
-        let body_pt  = ts(bx, by);
+        let tip = ts(pin.x, pin.y);
+        // Stub end: move from tip toward the body by stub_len
+        let body_pt = match pin.angle {
+            0   => ts(pin.x + stub_len, pin.y),
+            90  => ts(pin.x,            pin.y + stub_len),
+            180 => ts(pin.x - stub_len, pin.y),
+            _   => ts(pin.x,            pin.y - stub_len),
+        };
 
         painter.line_segment([tip, body_pt], egui::Stroke::new(1.0, pin_col));
         painter.circle_filled(tip, 2.0, pin_col);
 
-        // Pin name — just inside body end
-        let (na, no) = match pin.angle {
-            0   => (egui::Align2::LEFT_CENTER,   egui::vec2( 3.0,  0.0)),
-            180 => (egui::Align2::RIGHT_CENTER,  egui::vec2(-3.0,  0.0)),
-            90  => (egui::Align2::CENTER_BOTTOM, egui::vec2( 0.0, -3.0)),
-            _   => (egui::Align2::CENTER_TOP,    egui::vec2( 0.0,  3.0)),
-        };
-        painter.text(body_pt + no, na, &pin.name,
-            egui::FontId::proportional(font_sz), name_col);
+        // Pin name — just inside stub end (skip if identical to pin number to avoid duplication)
+        if pin.name != pin.number && !pin.name.is_empty() {
+            let (na, no) = match pin.angle {
+                0   => (egui::Align2::LEFT_CENTER,   egui::vec2( 3.0,  0.0)),
+                180 => (egui::Align2::RIGHT_CENTER,  egui::vec2(-3.0,  0.0)),
+                90  => (egui::Align2::CENTER_BOTTOM, egui::vec2( 0.0, -3.0)),
+                _   => (egui::Align2::CENTER_TOP,    egui::vec2( 0.0,  3.0)),
+            };
+            painter.text(body_pt + no, na, &pin.name,
+                egui::FontId::proportional(font_sz), name_col);
+        }
 
-        // Pin number — near midpoint, offset to avoid the line
+        // Pin number — near midpoint of stub, offset away from the line
         let mid = egui::pos2((tip.x + body_pt.x) * 0.5, (tip.y + body_pt.y) * 0.5);
         let (na2, no2) = match pin.angle {
             0 | 180 => (egui::Align2::CENTER_BOTTOM, egui::vec2( 0.0, -2.0)),
