@@ -749,7 +749,24 @@ impl eframe::App for App {
                     } else {
                         cols[0].label(egui::RichText::new("Symbol  (no data)").strong());
                     }
-                    cols[0].add_space(8.0);
+                    cols[0].add_space(4.0);
+                    cols[0].separator();
+                    cols[0].label(egui::RichText::new("Symbol Text Positions (mm)").strong());
+                    egui::Grid::new("sym_adj").spacing([8.0, 4.0]).show(&mut cols[0], |ui| {
+                        ui.label("Reference X:");
+                        scrollable_drag_helper(ui, &mut self.state.ref_pos[0], 0.1, 0.0025, None);
+                        ui.label("Y:");
+                        scrollable_drag_helper(ui, &mut self.state.ref_pos[1], 0.1, 0.0025, None);
+                        if ui.button("Reset").clicked() { self.state.ref_pos = [0.0, 3.81]; }
+                        ui.end_row();
+                        ui.label("Value X:");
+                        scrollable_drag_helper(ui, &mut self.state.val_pos[0], 0.1, 0.0025, None);
+                        ui.label("Y:");
+                        scrollable_drag_helper(ui, &mut self.state.val_pos[1], 0.1, 0.0025, None);
+                        if ui.button("Reset").clicked() { self.state.val_pos = [0.0, 2.54]; }
+                        ui.end_row();
+                    });
+                    cols[0].add_space(4.0);
                     cols[0].label(egui::RichText::new("Footprint  (drag: pan  scroll: zoom)").strong());
                     if let Some(tex) = &self.state.footprint_texture {
                         show_panzoom_image(&mut cols[0], tex, egui::Vec2::new(460.0, 320.0), &mut self.state.fp_pz, "fp");
@@ -814,23 +831,6 @@ impl eframe::App for App {
                         }
                     }
 
-                    cols[1].add_space(8.0);
-                    cols[1].separator();
-                    cols[1].label(egui::RichText::new("Symbol Text Positions (mm)").strong());
-                    egui::Grid::new("sym_adj").spacing([8.0, 4.0]).show(&mut cols[1], |ui| {
-                        ui.label("Reference X:");
-                        scrollable_drag_helper(ui, &mut self.state.ref_pos[0], 0.1, 0.0025, None);
-                        ui.label("Y:");
-                        scrollable_drag_helper(ui, &mut self.state.ref_pos[1], 0.1, 0.0025, None);
-                        if ui.button("Reset").clicked() { self.state.ref_pos = [0.0, 3.81]; }
-                        ui.end_row();
-                        ui.label("Value X:");
-                        scrollable_drag_helper(ui, &mut self.state.val_pos[0], 0.1, 0.0025, None);
-                        ui.label("Y:");
-                        scrollable_drag_helper(ui, &mut self.state.val_pos[1], 0.1, 0.0025, None);
-                        if ui.button("Reset").clicked() { self.state.val_pos = [0.0, 2.54]; }
-                        ui.end_row();
-                    });
                 });
 
                 ui.add_space(4.0);
