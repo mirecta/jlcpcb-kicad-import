@@ -1294,7 +1294,7 @@ fn show_symbol_preview(
         );
     } else {
         // Draw EasyEDA-derived graphical elements
-        let body_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(136, 0, 0));
+        let body_stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(136, 0, 0));
         for g in graphics {
             match g {
                 api::SymGraphic::Arc { start, mid, end, .. } => {
@@ -1306,7 +1306,7 @@ fn show_symbol_preview(
                         points: pts,
                         closed: false,
                         fill: egui::Color32::TRANSPARENT,
-                        stroke: egui::epaint::PathStroke::new(1.5, egui::Color32::from_rgb(136, 0, 0)),
+                        stroke: egui::epaint::PathStroke::new(2.0, egui::Color32::from_rgb(136, 0, 0)),
                     }));
                 }
                 api::SymGraphic::Poly { pts, .. } => {
