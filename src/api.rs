@@ -539,8 +539,13 @@ fn extract_sym_graphics(easyeda: &serde_json::Value) -> Vec<SymGraphic> {
             let width = p.get(4).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0) * S;
             if let Some(([x1,y1], rx, ry, fa, fs, [x2,y2])) = parse_ee_arc(path) {
                 let mid = svg_arc_mid(x1, y1, rx, ry, fa, fs, x2, y2);
+                // Snap arc endpoint Y to nearest grid (0.254 mm = 1 EasyEDA unit)
+                // so adjacent arcs share exactly the same baseline Y.
+                let snap = |v: f32| (v / S).round() * S;
+                let mut s = t(x1, y1); s[1] = snap(s[1]);
+                let mut e = t(x2, y2); e[1] = snap(e[1]);
                 out.push(SymGraphic::Arc {
-                    start: t(x1, y1), mid: t(mid[0], mid[1]), end: t(x2, y2), width,
+                    start: s, mid: t(mid[0], mid[1]), end: e, width,
                 });
             }
 
