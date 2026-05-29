@@ -261,11 +261,15 @@ fn build_symbol_body(sym_name: &str, pins: &[Pin], graphics: &[SymGraphic]) -> S
             (-5.08_f32, 1.27, 5.08, -1.27)
         } else {
             let pts: Vec<(f32, f32)> = pins.iter().map(|p| body_end(p)).collect();
-            let m = 0.5_f32;
-            (pts.iter().map(|(x,_)| *x).fold(f32::MAX, f32::min) - m,
-             pts.iter().map(|(_,y)| *y).fold(f32::MIN, f32::max) + m,
-             pts.iter().map(|(x,_)| *x).fold(f32::MIN, f32::max) + m,
-             pts.iter().map(|(_,y)| *y).fold(f32::MAX, f32::min) - m)
+            let min_x = pts.iter().map(|(x,_)| *x).fold(f32::MAX, f32::min);
+            let max_x = pts.iter().map(|(x,_)| *x).fold(f32::MIN, f32::max);
+            let min_y = pts.iter().map(|(_,y)| *y).fold(f32::MAX, f32::min);
+            let max_y = pts.iter().map(|(_,y)| *y).fold(f32::MIN, f32::max);
+            let cx = (min_x + max_x) * 0.5;
+            let cy = (min_y + max_y) * 0.5;
+            let hw = ((max_x - min_x) * 0.5).max(0.635_f32);
+            let hh = ((max_y - min_y) * 0.5).max(0.635_f32);
+            (cx - hw, cy + hh, cx + hw, cy - hh)
         };
         out.push_str(&format!(
             "      (rectangle (start {:.3} {:.3}) (end {:.3} {:.3})\n        (stroke (width 0.254) (type default))\n        (fill (type background))\n      )\n",

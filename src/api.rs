@@ -647,6 +647,12 @@ fn extract_sym_graphics(easyeda: &serde_json::Value) -> Vec<SymGraphic> {
 
     let mut out: Vec<SymGraphic> = Vec::new();
 
+    for (i, shape) in shapes.iter().enumerate() {
+        if let Some(s) = shape.as_str() {
+            eprintln!("[sym_graphics] shape[{}]: {}", i, s);
+        }
+    }
+
     for shape in &shapes {
         let s = match shape.as_str() { Some(s) => s, None => continue };
         let (kind, _) = match s.split_once('~') { Some(p) => p, None => continue };
