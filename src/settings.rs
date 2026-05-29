@@ -29,6 +29,30 @@ fn config_path() -> PathBuf {
         .join("settings.json")
 }
 
+fn history_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("jlcpcb-kicad")
+        .join("history.json")
+}
+
+pub fn load_history() -> Vec<String> {
+    std::fs::read_to_string(history_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_history(history: &[String]) {
+    let path = history_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(history) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
 pub fn load() -> Settings {
     let path = config_path();
     std::fs::read_to_string(&path)

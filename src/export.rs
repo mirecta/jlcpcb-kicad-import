@@ -31,8 +31,9 @@ pub fn write_symbol(
     lib_name: &str,
     ref_pos: [f32; 2],
     val_pos: [f32; 2],
+    hide_pin_numbers: bool,
 ) -> Result<()> {
-    let sym = build_symbol(component, lib_name, ref_pos, val_pos);
+    let sym = build_symbol(component, lib_name, ref_pos, val_pos, hide_pin_numbers);
     let name = sanitize_name(&component.value);
 
     if paths.sym_file.exists() {
@@ -125,7 +126,7 @@ fn prop(name: &str, value: &str, at_y: f32, show: bool, _hide_name: bool) -> Str
     )
 }
 
-fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32; 2]) -> String {
+fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32; 2], hide_pin_numbers: bool) -> String {
     let name = sanitize_name(&c.value);
     let footprint_ref = format!(
         "{}:{}",
@@ -187,8 +188,11 @@ fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32;
 
     let body = build_symbol_body(sym_name, &c.pins, &c.sym_graphics);
 
+    let pin_num_clause = if hide_pin_numbers {
+        "\n    (pin_numbers\n      (hide yes)\n    )"
+    } else { "" };
     format!(
-        "  (symbol \"{sym_name}\"\n    (pin_names (offset 1.016))\n    (in_bom yes) (on_board yes)\n{props_str}\n{body}\n  )"
+        "  (symbol \"{sym_name}\"{pin_num_clause}\n    (pin_names (offset 1.016))\n    (in_bom yes) (on_board yes)\n{props_str}\n{body}\n  )"
     )
 }
 

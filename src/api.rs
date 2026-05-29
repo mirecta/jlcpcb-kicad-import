@@ -399,38 +399,27 @@ fn extract_pins(easyeda: &serde_json::Value) -> Vec<Pin> {
             if p0.len() < 7 { continue; }
 
             let pin_number = p0[3].to_string();
+            // p0[4]/p0[5] = pin tip in LOCAL component coords (same system as graphics).
+            let x: f32 = p0[4].parse().unwrap_or(0.0);
+            let y: f32 = p0[5].parse().unwrap_or(0.0);
             let rot: i32 = p0[6].parse::<i32>().unwrap_or(0).rem_euclid(360);
 
             // P~ rotation = direction the pin wire points outward (away from body).
             // KiCad angle = direction toward body = (rot + 180) % 360.
             let kicad_angle = (rot + 180) % 360;
 
-            // The path segment (M x,y h±len) gives pin tip in LOCAL component coords —
-            // the same coordinate system used by the symbol's PATH~/LINE~ graphics.
-            // p0[4],p0[5] are absolute schematic coordinates: wrong for our purposes.
-            // Strip color suffix "M x y h n~#color" → "M x y h n" before SVG parse
-            let path_seg = [1usize, 2, 3].iter().find_map(|&i| {
+            // Stub length: path segment "M x y h±n~#color" — strip color, measure displacement.
+            let stub_mm = [1usize, 2, 3].iter().find_map(|&i| {
                 let raw = segs.get(i).copied()?;
                 let svg = raw.split('~').next().unwrap_or(raw);
                 let sub = parse_svg_d(svg);
-                if sub.is_empty() { None } else { Some(sub) }
-            }).unwrap_or_default();
-
-            let (local_x, local_y) = path_seg.first()
-                .and_then(|(pts, _)| pts.first().copied())
-                .unwrap_or_else(|| (
-                    p0[4].parse().unwrap_or(0.0),
-                    p0[5].parse().unwrap_or(0.0),
-                ));
-
-            let stub_mm = path_seg.first()
-                .and_then(|(pts, _)| {
+                sub.first().and_then(|(pts, _)| {
                     let (x1, y1) = pts.first().copied()?;
                     let (x2, y2) = pts.last().copied()?;
                     let d = (x2 - x1).abs().max((y2 - y1).abs()) * SCALE;
                     if d > 0.01 { Some(d) } else { None }
                 })
-                .unwrap_or(2.54);
+            }).unwrap_or(2.54);
 
             // Segments 3 and 4 are text labels. Identify name vs number by matching
             // against pin_number: the segment whose text == pin_number is the number label.
@@ -449,7 +438,7 @@ fn extract_pins(easyeda: &serde_json::Value) -> Vec<Pin> {
                 text3
             };
 
-            raw.push((local_x, local_y, kicad_angle, pin_name, pin_number, "passive".to_string(), stub_mm));
+            raw.push((x, y, kicad_angle, pin_name, pin_number, "passive".to_string(), stub_mm));
         }
     }
 
@@ -486,25 +475,11 @@ fn ee_pin_centroid(shapes: &[serde_json::Value]) -> (f32, f32) {
                 }
             }
         } else if s.starts_with("P~") {
-            // P~ pin tip in LOCAL component coords lives in the path segment (M x,y h±len).
-            // The segment may have a color suffix "M x y h n~#color" — strip after first ~.
-            let segs: Vec<&str> = s.split("^^").collect();
-            let tip = [1usize, 2, 3].iter().find_map(|&i| {
-                let raw_seg = segs.get(i).copied().unwrap_or("");
-                let svg = raw_seg.split('~').next().unwrap_or(raw_seg);
-                parse_svg_d(svg)
-                    .into_iter().next()
-                    .and_then(|(pts, _)| pts.first().copied())
-            });
-            if let Some((x, y)) = tip {
-                xs.push(x); ys.push(y);
-            } else {
-                // Absolute fallback — better than nothing
-                let p0: Vec<&str> = segs[0].split('~').collect();
-                if p0.len() >= 6 {
-                    if let (Ok(x), Ok(y)) = (p0[4].parse::<f32>(), p0[5].parse::<f32>()) {
-                        xs.push(x); ys.push(y);
-                    }
+            // p0[4]/p0[5] are the pin tip in LOCAL component coords.
+            let p0: Vec<&str> = s.split("^^").next().unwrap_or("").split('~').collect();
+            if p0.len() >= 6 {
+                if let (Ok(x), Ok(y)) = (p0[4].parse::<f32>(), p0[5].parse::<f32>()) {
+                    xs.push(x); ys.push(y);
                 }
             }
         }

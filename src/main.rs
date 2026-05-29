@@ -111,6 +111,7 @@ enum BgMsg {
 struct AppState {
     // Search input
     search_input: String,
+    search_history: Vec<String>,
 
     // Search results list
     search_results: Vec<SearchResult>,
@@ -147,6 +148,7 @@ struct AppState {
     import_symbol: bool,
     import_footprint: bool,
     import_package: bool,
+    hide_pin_numbers: bool,
 
     // Filters
     basic_only: bool,
@@ -178,6 +180,7 @@ impl App {
         setup_fonts(&cc.egui_ctx);
         let mut state = AppState::default();
         state.settings = settings::load();
+        state.search_history = settings::load_history();
 
         // Override lib_path from command line if provided
         if let Some(path) = lib_path_override {
@@ -204,6 +207,11 @@ impl App {
     fn do_search(&mut self) {
         let query = self.state.search_input.trim().to_string();
         if query.is_empty() { return; }
+        // Update history: move to front, deduplicate, cap at 50
+        self.state.search_history.retain(|h| h != &query);
+        self.state.search_history.insert(0, query.clone());
+        self.state.search_history.truncate(50);
+        settings::save_history(&self.state.search_history);
         self.state.search_results.clear();
         self.state.selected_idx = None;
         self.state.component = None;
@@ -501,6 +509,37 @@ impl eframe::App for App {
                         ui.close_menu();
                     }
                 });
+                // Suggestions dropdown
+                let q = self.state.search_input.trim().to_lowercase();
+                let suggestions: Vec<String> = if q.is_empty() {
+                    self.state.search_history.iter().take(8).cloned().collect()
+                } else {
+                    self.state.search_history.iter()
+                        .filter(|h| h.to_lowercase().contains(&q))
+                        .take(8)
+                        .cloned()
+                        .collect()
+                };
+                let show_popup = resp.has_focus() && !suggestions.is_empty();
+                if show_popup {
+                    let popup_id = egui::Id::new("search_history_popup");
+                    let rect = resp.rect;
+                    egui::Area::new(popup_id)
+                        .fixed_pos(rect.left_bottom())
+                        .order(egui::Order::Foreground)
+                        .show(ctx, |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.set_min_width(rect.width());
+                                for s in &suggestions {
+                                    if ui.selectable_label(false, s.as_str()).clicked() {
+                                        self.state.search_input = s.clone();
+                                        self.do_search();
+                                    }
+                                }
+                            });
+                        });
+                }
+
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let clicked = ui.add_enabled(!self.state.loading, egui::Button::new("Search")).clicked();
                 ui.checkbox(&mut self.state.basic_only, "Basic only");
@@ -1053,6 +1092,12 @@ impl eframe::App for App {
                     ui.checkbox(&mut self.state.import_footprint, "Footprint");
                     ui.checkbox(&mut self.state.import_package, "3D Model");
                 });
+                if self.state.import_symbol {
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.checkbox(&mut self.state.hide_pin_numbers, "Hide pin numbers");
+                    });
+                }
                 ui.add_space(4.0);
                 if ui.button("  Import  ").clicked() {
                     let lib_name = self.state.settings.lib_name.clone();
@@ -1073,7 +1118,8 @@ impl eframe::App for App {
                         // Import symbol
                         if self.state.import_symbol {
                             export::write_symbol(&paths, &comp, &lib_name,
-                                self.state.ref_pos, self.state.val_pos)?;
+                                self.state.ref_pos, self.state.val_pos,
+                                self.state.hide_pin_numbers)?;
                         }
 
                         // Import footprint
