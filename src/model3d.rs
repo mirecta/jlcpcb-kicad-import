@@ -635,12 +635,14 @@ fn build_pcb_body(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[
         let hw = pad.w * 0.5;
         let hh = pad.h * 0.5;
         if pad.drill > 0.0 {
-            let dr = pad.drill * 0.5;
-            // Copper barrel — open cylinder, no caps so you can see through the hole
+            let dr  = pad.drill * 0.5;
+            let r_o = hw.max(hh); // outer pad radius
+            // Copper barrel — open cylinder, no caps so hole is see-through
             cylinder_hole(&mut v, pad.cx, pad.cz, dr, 0.0, -thick, pc);
-            // Annular copper pads (top and bottom)
-            draw_pad(&mut v, pad, hw, hh,  0.05,          pc);
-            draw_pad(&mut v, pad, hw, hh, -thick - 0.05,  pc);
+            // Annular ring pads: inner=drill radius, outer=pad radius
+            // This keeps the hole center genuinely open for see-through
+            ring_y(&mut v, pad.cx, pad.cz, dr, r_o,  0.05,         pc);
+            ring_y(&mut v, pad.cx, pad.cz, dr, r_o, -thick - 0.05, pc);
         } else {
             draw_pad(&mut v, pad, hw, hh, 0.05, pc);
         }
@@ -701,6 +703,27 @@ fn circle_y(v: &mut Vec<f32>, cx: f32, cz: f32, r: f32, y: f32, c: [f32; 3]) {
         v.extend_from_slice(&p1);
         v.extend_from_slice(&n);
         v.extend_from_slice(&c);
+    }
+}
+
+// Annular ring (washer) in XZ plane — inner radius r_i, outer radius r_o
+fn ring_y(v: &mut Vec<f32>, cx: f32, cz: f32, r_i: f32, r_o: f32, y: f32, c: [f32; 3]) {
+    let n: [f32; 3] = [0.0, if y >= 0.0 { 1.0 } else { -1.0 }, 0.0];
+    let segments = 32;
+    for i in 0..segments {
+        let a0 = (i as f32) * 2.0 * std::f32::consts::PI / segments as f32;
+        let a1 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / segments as f32;
+        let pi0 = [cx + r_i * a0.cos(), y, cz + r_i * a0.sin()];
+        let pi1 = [cx + r_i * a1.cos(), y, cz + r_i * a1.sin()];
+        let po0 = [cx + r_o * a0.cos(), y, cz + r_o * a0.sin()];
+        let po1 = [cx + r_o * a1.cos(), y, cz + r_o * a1.sin()];
+        if y >= 0.0 {
+            for pt in [pi0, po0, po1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
+            for pt in [pi0, po1, pi1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
+        } else {
+            for pt in [pi0, po1, po0] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
+            for pt in [pi0, pi1, po1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
+        }
     }
 }
 
