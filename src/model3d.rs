@@ -48,6 +48,7 @@ pub struct PadInfo {
     pub w:  f32,
     pub h:  f32,
     pub shape: String,  // "circle", "rect", "oval"
+    pub drill: f32,     // 0 = SMD; >0 = through-hole drill diameter in mm
 }
 
 // ── Footprint drawing (silkscreen / fab layer flat geometry) ──────────────────
@@ -305,7 +306,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h, shape: p.shape.clone() })
+                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -327,7 +328,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h, shape: p.shape.clone() })
+                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -349,7 +350,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h, shape: p.shape.clone() })
+                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -579,41 +580,51 @@ fn build_pcb_and_pads(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings
     rect_xz_face(&mut v, -half, -thick,  half, -half, 0.0, -half, [-1.0, 0.0, 0.0], ec);
 
     // Pads: flat quads/circles at Y=0.05 (above PCB to avoid z-fight)
-    let py = 0.05_f32;
-    let pc = [0.85, 0.68, 0.08_f32];
+    let py  = 0.05_f32;
+    let pc  = [0.85, 0.68, 0.08_f32]; // copper/gold
+    let hc  = [0.08, 0.04, 0.02_f32]; // dark hole interior
+
+    let draw_pad_shape = |v: &mut Vec<f32>, pad: &PadInfo, hw: f32, hh: f32, y: f32, c: [f32; 3]| {
+        match pad.shape.as_str() {
+            "circle" => {
+                circle_y(v, pad.cx, pad.cz, hw.max(hh), y, c);
+            }
+            "oval" => {
+                if (hw - hh).abs() < 0.01 {
+                    circle_y(v, pad.cx, pad.cz, hw, y, c);
+                } else if hw > hh {
+                    quad_y(v, pad.cx - hw + hh, pad.cx + hw - hh, pad.cz - hh, pad.cz + hh, y, c);
+                    circle_y(v, pad.cx - hw + hh, pad.cz, hh, y, c);
+                    circle_y(v, pad.cx + hw - hh, pad.cz, hh, y, c);
+                } else {
+                    quad_y(v, pad.cx - hw, pad.cx + hw, pad.cz - hh + hw, pad.cz + hh - hw, y, c);
+                    circle_y(v, pad.cx, pad.cz - hh + hw, hw, y, c);
+                    circle_y(v, pad.cx, pad.cz + hh - hw, hw, y, c);
+                }
+            }
+            _ => {
+                quad_y(v, pad.cx - hw, pad.cx + hw, pad.cz - hh, pad.cz + hh, y, c);
+            }
+        }
+    };
+
     for pad in pads {
         let hw = pad.w * 0.5;
         let hh = pad.h * 0.5;
 
-        match pad.shape.as_str() {
-            "circle" => {
-                // Render as circle using the larger of w or h as diameter
-                let r = hw.max(hh);
-                circle_y(&mut v, pad.cx, pad.cz, r, py, pc);
-            }
-            "oval" => {
-                // Render as rounded rectangle (simplified as circle for now)
-                if (hw - hh).abs() < 0.01 {
-                    circle_y(&mut v, pad.cx, pad.cz, hw, py, pc);
-                } else {
-                    // Oval: rect + two half-circles
-                    if hw > hh {
-                        // Horizontal oval
-                        quad_y(&mut v, pad.cx - hw + hh, pad.cx + hw - hh, pad.cz - hh, pad.cz + hh, py, pc);
-                        circle_y(&mut v, pad.cx - hw + hh, pad.cz, hh, py, pc);
-                        circle_y(&mut v, pad.cx + hw - hh, pad.cz, hh, py, pc);
-                    } else {
-                        // Vertical oval
-                        quad_y(&mut v, pad.cx - hw, pad.cx + hw, pad.cz - hh + hw, pad.cz + hh - hw, py, pc);
-                        circle_y(&mut v, pad.cx, pad.cz - hh + hw, hw, py, pc);
-                        circle_y(&mut v, pad.cx, pad.cz + hh - hw, hw, py, pc);
-                    }
-                }
-            }
-            _ => {
-                // Default: rectangular pad
-                quad_y(&mut v, pad.cx - hw, pad.cx + hw, pad.cz - hh, pad.cz + hh, py, pc);
-            }
+        if pad.drill > 0.0 {
+            let dr = pad.drill * 0.5; // hole radius
+            // Top annular ring: full copper pad, then overdraw hole
+            draw_pad_shape(&mut v, pad, hw, hh, py, pc);
+            circle_y(&mut v, pad.cx, pad.cz, dr, py + 0.01, hc);
+            // Copper barrel through the board
+            cylinder_hole(&mut v, pad.cx, pad.cz, dr, 0.0, -thick, pc);
+            // Bottom annular ring
+            let by = -thick - 0.05;
+            draw_pad_shape(&mut v, pad, hw, hh, by, pc);
+            circle_y_down(&mut v, pad.cx, pad.cz, dr, by - 0.01, hc);
+        } else {
+            draw_pad_shape(&mut v, pad, hw, hh, py, pc);
         }
     }
 
@@ -659,6 +670,43 @@ fn circle_y(v: &mut Vec<f32>, cx: f32, cz: f32, r: f32, y: f32, c: [f32; 3]) {
         v.extend_from_slice(&p1);
         v.extend_from_slice(&n);
         v.extend_from_slice(&c);
+    }
+}
+
+// Same as circle_y but normal faces DOWN (for bottom-facing surfaces)
+fn circle_y_down(v: &mut Vec<f32>, cx: f32, cz: f32, r: f32, y: f32, c: [f32; 3]) {
+    let n = [0.0_f32, -1.0, 0.0];
+    let segments = 24;
+    for i in 0..segments {
+        let a0 = (i as f32) * 2.0 * std::f32::consts::PI / segments as f32;
+        let a1 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / segments as f32;
+        let center = [cx, y, cz];
+        let p0 = [cx + r * a0.cos(), y, cz + r * a0.sin()];
+        let p1 = [cx + r * a1.cos(), y, cz + r * a1.sin()];
+        // Reversed winding for downward normal
+        for pt in [center, p1, p0] {
+            v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c);
+        }
+    }
+}
+
+// Copper-plated through-hole barrel: cylinder from y_top to y_bot, inward normals
+fn cylinder_hole(v: &mut Vec<f32>, cx: f32, cz: f32, r: f32, y_top: f32, y_bot: f32, c: [f32; 3]) {
+    let segments = 24;
+    for i in 0..segments {
+        let a0 = (i as f32) * 2.0 * std::f32::consts::PI / segments as f32;
+        let a1 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / segments as f32;
+        let (c0, s0) = (a0.cos(), a0.sin());
+        let (c1, s1) = (a1.cos(), a1.sin());
+        let n0 = [-c0, 0.0_f32, -s0]; // inward normal
+        let n1 = [-c1, 0.0_f32, -s1];
+        let t0 = [cx + r*c0, y_top, cz + r*s0];
+        let t1 = [cx + r*c1, y_top, cz + r*s1];
+        let b0 = [cx + r*c0, y_bot,  cz + r*s0];
+        let b1 = [cx + r*c1, y_bot,  cz + r*s1];
+        // Two triangles per segment
+        for (p, n) in [(t0,n0),(b0,n0),(b1,n1)] { v.extend_from_slice(&p); v.extend_from_slice(&n); v.extend_from_slice(&c); }
+        for (p, n) in [(t0,n0),(b1,n1),(t1,n1)] { v.extend_from_slice(&p); v.extend_from_slice(&n); v.extend_from_slice(&c); }
     }
 }
 

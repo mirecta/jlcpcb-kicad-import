@@ -397,7 +397,7 @@ impl eframe::App for App {
                         .map(|p| {
                             let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
                             let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
-                            model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone() }
+                            model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone(), drill: p.drill }
                         })
                         .collect();
                     let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
@@ -955,7 +955,7 @@ impl eframe::App for App {
                                             .map(|p| {
                                                 let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
                                                 let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
-                                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone() }
+                                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone(), drill: p.drill }
                                             })
                                             .collect();
                                         let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
@@ -987,7 +987,7 @@ impl eframe::App for App {
                                             .map(|p| {
                                                 let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
                                                 let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
-                                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone() }
+                                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone(), drill: p.drill }
                                             })
                                             .collect();
                                         let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
