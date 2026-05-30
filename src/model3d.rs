@@ -596,15 +596,21 @@ fn build_pcb_body(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[
     let thick = 1.6_f32;
     let mut v: Vec<f32> = Vec::new();
 
-    // Full solid PCB surfaces — no pixelated grid tessellation
+    // Collect drill holes for surface tessellation
+    let holes: Vec<(f32, f32, f32)> = pads.iter()
+        .filter(|p| p.drill > 0.0)
+        .map(|p| (p.cx, p.cz, p.drill * 0.5))
+        .collect();
+
+    // Top surface (Y=0) and bottom surface (Y=-thick) — tessellated with real holes
     let top_green = [0.10_f32, 0.42, 0.12];
     let bot_green = [0.07_f32, 0.30, 0.09];
-    let white     = [1.00_f32, 1.00, 1.00]; // matches clear_color — creates smooth round holes
-    quad_y(&mut v, -half, half, -half, half,  0.0,    top_green);
-    quad_y(&mut v,  half,-half, -half, half, -thick,  bot_green);
+    quad_y_holed(&mut v, half, &holes, 0.0,    top_green);
+    quad_y_holed(&mut v, half, &holes, -thick, bot_green);
 
-    let pc = [0.85_f32, 0.68, 0.08]; // copper
+    let pc  = [0.85_f32, 0.68, 0.08]; // copper
 
+    // Pads and through-hole barrels
     let draw_pad = |v: &mut Vec<f32>, pad: &PadInfo, hw: f32, hh: f32, y: f32, c: [f32; 3]| {
         match pad.shape.as_str() {
             "circle" => circle_y(v, pad.cx, pad.cz, hw.max(hh), y, c),
@@ -630,13 +636,11 @@ fn build_pcb_body(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[
         let hh = pad.h * 0.5;
         if pad.drill > 0.0 {
             let dr  = pad.drill * 0.5;
-            let r_o = hw.max(hh);
-            // Smooth white circles over the green PCB — clean crisp round holes
-            circle_y(     &mut v, pad.cx, pad.cz, dr,  0.001, white);
-            circle_y_down(&mut v, pad.cx, pad.cz, dr, -thick - 0.001, white);
-            // Open copper barrel — no caps so the hole is see-through from any angle
+            let r_o = hw.max(hh); // outer pad radius
+            // Copper barrel — open cylinder, no caps so hole is see-through
             cylinder_hole(&mut v, pad.cx, pad.cz, dr, 0.0, -thick, pc);
-            // Annular copper pads (inner = drill, outer = pad)
+            // Annular ring pads: inner=drill radius, outer=pad radius
+            // This keeps the hole center genuinely open for see-through
             ring_y(&mut v, pad.cx, pad.cz, dr, r_o,  0.05,         pc);
             ring_y(&mut v, pad.cx, pad.cz, dr, r_o, -thick - 0.05, pc);
         } else {
@@ -713,13 +717,12 @@ fn ring_y(v: &mut Vec<f32>, cx: f32, cz: f32, r_i: f32, r_o: f32, y: f32, c: [f3
         let pi1 = [cx + r_i * a1.cos(), y, cz + r_i * a1.sin()];
         let po0 = [cx + r_o * a0.cos(), y, cz + r_o * a0.sin()];
         let po1 = [cx + r_o * a1.cos(), y, cz + r_o * a1.sin()];
-        // CCW from above (+Y normal) for top face; CW (+Y reversed = -Y normal) for bottom
         if y >= 0.0 {
-            for pt in [pi0, po1, po0] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
-            for pt in [pi0, pi1, po1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
-        } else {
             for pt in [pi0, po0, po1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
             for pt in [pi0, po1, pi1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
+        } else {
+            for pt in [pi0, po1, po0] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
+            for pt in [pi0, pi1, po1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
         }
     }
 }
