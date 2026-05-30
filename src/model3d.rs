@@ -258,7 +258,7 @@ impl GlState {
             gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
             gl.depth_mask(false); // don't write depth for transparent geometry
             if let Some(loc) = gl.get_uniform_location(self.program, "u_alpha") {
-                gl.uniform_1_f32(Some(&loc), 0.35);
+                gl.uniform_1_f32(Some(&loc), 0.80);
             }
             set_model(gl, self.program, &Mat4::IDENTITY, &Mat3::IDENTITY);
             gl.bind_vertex_array(Some(self.edge_vao));
