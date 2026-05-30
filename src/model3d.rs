@@ -636,11 +636,8 @@ fn build_pcb_body(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[
         let hh = pad.h * 0.5;
         if pad.drill > 0.0 {
             let dr = pad.drill * 0.5;
-            // Copper barrel through the board
-            cylinder_hole(&mut v, pad.cx, pad.cz, dr, 0.001, -thick, pc);
-            // Barrel caps: visible copper discs at top and bottom of hole
-            circle_y(     &mut v, pad.cx, pad.cz, dr,  0.002, pc);
-            circle_y_down(&mut v, pad.cx, pad.cz, dr, -thick - 0.002, pc);
+            // Copper barrel — open cylinder, no caps so you can see through the hole
+            cylinder_hole(&mut v, pad.cx, pad.cz, dr, 0.0, -thick, pc);
             // Annular copper pads (top and bottom)
             draw_pad(&mut v, pad, hw, hh,  0.05,          pc);
             draw_pad(&mut v, pad, hw, hh, -thick - 0.05,  pc);
