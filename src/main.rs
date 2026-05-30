@@ -1257,7 +1257,6 @@ fn show_symbol_preview(
     pz: &mut PanZoom,
     display_size: egui::Vec2,
 ) {
-    const PIN_LEN: f32 = 2.54;
 
     let (rect, response) = ui.allocate_exact_size(display_size, egui::Sense::click_and_drag());
 
@@ -1284,43 +1283,18 @@ fn show_symbol_preview(
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
 
-    // body-end helper (KiCad mm, Y-up)
-    let body_end = |p: &Pin| -> (f32, f32) {
-        match p.angle {
-            0   => (p.x + PIN_LEN, p.y),
-            90  => (p.x,           p.y + PIN_LEN),
-            180 => (p.x - PIN_LEN, p.y),
-            _   => (p.x,           p.y - PIN_LEN),
-        }
-    };
-
-    // Body rectangle bounds — body_ends are exact edges, minimum 1.27mm body size
-    let (bmin_x, bmax_x, bmin_y, bmax_y) = if pins.is_empty() {
-        (-5.08f32, 5.08, -1.27, 1.27)
-    } else {
-        let pts: Vec<(f32, f32)> = pins.iter().map(|p| body_end(p)).collect();
-        let min_x = pts.iter().map(|(x, _)| *x).fold(f32::MAX, f32::min);
-        let max_x = pts.iter().map(|(x, _)| *x).fold(f32::MIN, f32::max);
-        let min_y = pts.iter().map(|(_, y)| *y).fold(f32::MAX, f32::min);
-        let max_y = pts.iter().map(|(_, y)| *y).fold(f32::MIN, f32::max);
-        let cx = (min_x + max_x) * 0.5;
-        let cy = (min_y + max_y) * 0.5;
-        let hw = ((max_x - min_x) * 0.5).max(0.635_f32);
-        let hh = ((max_y - min_y) * 0.5).max(0.635_f32);
-        (cx - hw, cx + hw, cy - hh, cy + hh)
-    };
-
-    // Full extents for auto-fit (body + pin tips + label positions + graphics)
+    // Full extents for auto-fit (pin tips + label positions + graphics)
     let label_pad = (value.len() as f32 * 0.9).max(5.0);
-    let mut min_x = bmin_x.min(ref_pos[0] - 2.0).min(val_pos[0] - 2.0);
-    let mut max_x = bmax_x.max(ref_pos[0] + label_pad).max(val_pos[0] + label_pad);
-    let mut min_y = bmin_y.min(ref_pos[1] - 2.0).min(val_pos[1] - 2.0);
-    let mut max_y = bmax_y.max(ref_pos[1] + 2.0).max(val_pos[1] + 2.0);
+    let mut min_x = ref_pos[0].min(val_pos[0]) - 2.0;
+    let mut max_x = ref_pos[0].max(val_pos[0]) + label_pad;
+    let mut min_y = ref_pos[1].min(val_pos[1]) - 2.0;
+    let mut max_y = ref_pos[1].max(val_pos[1]) + 2.0;
     for p in pins {
-        min_x = min_x.min(p.x - PIN_LEN - 0.5);
-        max_x = max_x.max(p.x + PIN_LEN + 0.5);
-        min_y = min_y.min(p.y - PIN_LEN - 0.5);
-        max_y = max_y.max(p.y + PIN_LEN + 0.5);
+        let sl = p.stub_len + 0.5;
+        min_x = min_x.min(p.x - sl);
+        max_x = max_x.max(p.x + sl);
+        min_y = min_y.min(p.y - sl);
+        max_y = max_y.max(p.y + sl);
     }
     // Extend auto-fit to cover graphical elements (arcs, circles, etc.)
     for g in graphics {
@@ -1354,16 +1328,7 @@ fn show_symbol_preview(
         center.y - (my - cy_mm) * scale,
     );
 
-    if graphics.is_empty() {
-        // Auto-generated rectangle body — no fill, dark red border
-        painter.rect(
-            egui::Rect::from_two_pos(ts(bmin_x, bmax_y), ts(bmax_x, bmin_y)),
-            0.0,
-            egui::Color32::TRANSPARENT,
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(160, 0, 0)),
-            egui::StrokeKind::Middle,
-        );
-    } else {
+    {
         // Draw EasyEDA-derived graphical elements
         let body_stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(136, 0, 0));
         for g in graphics {
@@ -1421,21 +1386,11 @@ fn show_symbol_preview(
 
     for pin in pins {
         let tip = ts(pin.x, pin.y);
-        let body_pt = if graphics.is_empty() {
-            // Terminate exactly at the rectangle edge (no overshoot into body)
-            match pin.angle {
-                0   => ts(bmin_x, pin.y),
-                90  => ts(pin.x,  bmin_y),
-                180 => ts(bmax_x, pin.y),
-                _   => ts(pin.x,  bmax_y),
-            }
-        } else {
-            match pin.angle {
-                0   => ts(pin.x + pin.stub_len, pin.y),
-                90  => ts(pin.x,                pin.y + pin.stub_len),
-                180 => ts(pin.x - pin.stub_len, pin.y),
-                _   => ts(pin.x,                pin.y - pin.stub_len),
-            }
+        let body_pt = match pin.angle {
+            0   => ts(pin.x + pin.stub_len, pin.y),
+            90  => ts(pin.x,                pin.y + pin.stub_len),
+            180 => ts(pin.x - pin.stub_len, pin.y),
+            _   => ts(pin.x,                pin.y - pin.stub_len),
         };
 
         painter.line_segment([tip, body_pt], egui::Stroke::new(1.0, pin_col));

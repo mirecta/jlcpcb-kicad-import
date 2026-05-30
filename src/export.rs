@@ -255,66 +255,43 @@ const PIN_LEN: f32 = 2.54;
 fn build_symbol_body(sym_name: &str, pins: &[Pin], graphics: &[SymGraphic]) -> String {
     let mut out = format!("    (symbol \"{sym_name}_0_1\"\n");
 
-    if graphics.is_empty() {
-        // Auto-generate rectangle body from pin endpoints
-        let (rx0, ry0, rx1, ry1) = if pins.is_empty() {
-            (-5.08_f32, 1.27, 5.08, -1.27)
-        } else {
-            let pts: Vec<(f32, f32)> = pins.iter().map(|p| body_end(p)).collect();
-            let min_x = pts.iter().map(|(x,_)| *x).fold(f32::MAX, f32::min);
-            let max_x = pts.iter().map(|(x,_)| *x).fold(f32::MIN, f32::max);
-            let min_y = pts.iter().map(|(_,y)| *y).fold(f32::MAX, f32::min);
-            let max_y = pts.iter().map(|(_,y)| *y).fold(f32::MIN, f32::max);
-            let cx = (min_x + max_x) * 0.5;
-            let cy = (min_y + max_y) * 0.5;
-            let hw = ((max_x - min_x) * 0.5).max(0.635_f32);
-            let hh = ((max_y - min_y) * 0.5).max(0.635_f32);
-            (cx - hw, cy + hh, cx + hw, cy - hh)
-        };
-        out.push_str(&format!(
-            "      (rectangle (start {:.3} {:.3}) (end {:.3} {:.3})\n        (stroke (width 0.254) (type default))\n        (fill (type background))\n      )\n",
-            rx0, ry0, rx1, ry1,
-        ));
-    } else {
-        // Emit EasyEDA-derived graphical elements
-        for g in graphics {
-            match g {
-                SymGraphic::Arc { start, mid, end, width } => {
-                    out.push_str(&format!(
-                        "      (arc (start {:.3} {:.3}) (mid {:.3} {:.3}) (end {:.3} {:.3})\n        (stroke (width {:.3}) (type default))\n        (fill (type none))\n      )\n",
-                        start[0], start[1], mid[0], mid[1], end[0], end[1], width
-                    ));
-                }
-                SymGraphic::Poly { pts, width, fill } => {
-                    let pts_str: String = pts.iter()
-                        .map(|p| format!("(xy {:.3} {:.3})", p[0], p[1]))
-                        .collect::<Vec<_>>().join(" ");
-                    let fill_str = if *fill { "outline" } else { "none" };
-                    out.push_str(&format!(
-                        "      (polyline (pts {pts_str})\n        (stroke (width {:.3}) (type default))\n        (fill (type {fill_str}))\n      )\n",
-                        width
-                    ));
-                }
-                SymGraphic::Circle { cx, cy, r, width, fill } => {
-                    let fill_str = if *fill { "outline" } else { "none" };
-                    out.push_str(&format!(
-                        "      (circle (center {:.3} {:.3}) (radius {:.3})\n        (stroke (width {:.3}) (type default))\n        (fill (type {fill_str}))\n      )\n",
-                        cx, cy, r, width
-                    ));
-                }
-                SymGraphic::Rect { x0, y0, x1, y1, width, fill } => {
-                    let fill_str = if *fill { "background" } else { "none" };
-                    out.push_str(&format!(
-                        "      (rectangle (start {:.3} {:.3}) (end {:.3} {:.3})\n        (stroke (width {:.3}) (type default))\n        (fill (type {fill_str}))\n      )\n",
-                        x0, y0, x1, y1, width
-                    ));
-                }
+    for g in graphics {
+        match g {
+            SymGraphic::Arc { start, mid, end, width } => {
+                out.push_str(&format!(
+                    "      (arc (start {:.3} {:.3}) (mid {:.3} {:.3}) (end {:.3} {:.3})\n        (stroke (width {:.3}) (type default))\n        (fill (type none))\n      )\n",
+                    start[0], start[1], mid[0], mid[1], end[0], end[1], width
+                ));
+            }
+            SymGraphic::Poly { pts, width, fill } => {
+                let pts_str: String = pts.iter()
+                    .map(|p| format!("(xy {:.3} {:.3})", p[0], p[1]))
+                    .collect::<Vec<_>>().join(" ");
+                let fill_str = if *fill { "outline" } else { "none" };
+                out.push_str(&format!(
+                    "      (polyline (pts {pts_str})\n        (stroke (width {:.3}) (type default))\n        (fill (type {fill_str}))\n      )\n",
+                    width
+                ));
+            }
+            SymGraphic::Circle { cx, cy, r, width, fill } => {
+                let fill_str = if *fill { "outline" } else { "none" };
+                out.push_str(&format!(
+                    "      (circle (center {:.3} {:.3}) (radius {:.3})\n        (stroke (width {:.3}) (type default))\n        (fill (type {fill_str}))\n      )\n",
+                    cx, cy, r, width
+                ));
+            }
+            SymGraphic::Rect { x0, y0, x1, y1, width, fill } => {
+                let fill_str = if *fill { "background" } else { "none" };
+                out.push_str(&format!(
+                    "      (rectangle (start {:.3} {:.3}) (end {:.3} {:.3})\n        (stroke (width {:.3}) (type default))\n        (fill (type {fill_str}))\n      )\n",
+                    x0, y0, x1, y1, width
+                ));
             }
         }
     }
 
     for pin in pins {
-        let pin_len = if graphics.is_empty() { PIN_LEN } else { pin.stub_len };
+        let pin_len = pin.stub_len;
         out.push_str(&format!(
             "      (pin {ptype} line\n        (at {x:.3} {y:.3} {angle})\n        (length {pin_len:.3})\n        (name \"{name}\" (effects (font (size 1.27 1.27))))\n        (number \"{num}\" (effects (font (size 1.27 1.27))))\n      )\n",
             ptype  = pin.pin_type,
@@ -330,14 +307,6 @@ fn build_symbol_body(sym_name: &str, pins: &[Pin], graphics: &[SymGraphic]) -> S
     out
 }
 
-fn body_end(p: &Pin) -> (f32, f32) {
-    match p.angle {
-        0   => (p.x + PIN_LEN, p.y),
-        90  => (p.x,           p.y + PIN_LEN),
-        180 => (p.x - PIN_LEN, p.y),
-        _   => (p.x,           p.y - PIN_LEN),
-    }
-}
 
 fn esc_pin(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
