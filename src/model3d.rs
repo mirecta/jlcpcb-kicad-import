@@ -137,7 +137,7 @@ impl GlState {
         upload_verts(gl, pcb_vao, pcb_vbo, &pcb_data);
 
         // ── PCB edge VAO (transparent) ───────────────────────────────────────
-        let edge_data = build_pcb_edges(mesh.radius, mesh.xz_half);
+        let edge_data = build_pcb_edges(mesh.radius, mesh.xz_half, &pads);
         let edge_vao = gl.create_vertex_array().ok()?;
         let edge_vbo = gl.create_buffer().ok()?;
         upload_verts(gl, edge_vao, edge_vbo, &edge_data);
@@ -665,9 +665,14 @@ fn build_pcb_body(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[
     v
 }
 
-fn build_pcb_edges(radius: f32, mesh_xz_half: f32) -> Vec<f32> {
+fn build_pcb_edges(radius: f32, mesh_xz_half: f32, pads: &[PadInfo]) -> Vec<f32> {
     const MARGIN: f32 = 3.0;
-    let half  = mesh_xz_half.max(radius * 0.5) + MARGIN;
+    let pad_half = if pads.is_empty() { 0.0_f32 } else {
+        let mx = pads.iter().map(|p| p.cx.abs() + p.w * 0.5).fold(0.0_f32, f32::max);
+        let mz = pads.iter().map(|p| p.cz.abs() + p.h * 0.5).fold(0.0_f32, f32::max);
+        mx.max(mz)
+    };
+    let half  = pad_half.max(mesh_xz_half).max(radius * 0.5) + MARGIN;
     let thick = 1.6_f32;
     let mut v: Vec<f32> = Vec::new();
     let ec = [0.08_f32, 0.32, 0.10]; // edge green
