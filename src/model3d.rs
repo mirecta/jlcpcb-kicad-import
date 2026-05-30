@@ -596,10 +596,11 @@ fn build_pcb_body(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[
     let thick = 1.6_f32;
     let mut v: Vec<f32> = Vec::new();
 
-    // Collect drill holes for surface tessellation
+    // Solder mask openings: cut PCB surface to the pad outer radius (not just drill),
+    // just like real solder mask openings. Adds 0.1mm clearance around the pad edge.
     let holes: Vec<(f32, f32, f32)> = pads.iter()
         .filter(|p| p.drill > 0.0)
-        .map(|p| (p.cx, p.cz, p.drill * 0.5))
+        .map(|p| (p.cx, p.cz, p.w.max(p.h) * 0.5 + 0.1))
         .collect();
 
     // Top surface (Y=0) and bottom surface (Y=-thick) — tessellated with real holes
@@ -717,12 +718,13 @@ fn ring_y(v: &mut Vec<f32>, cx: f32, cz: f32, r_i: f32, r_o: f32, y: f32, c: [f3
         let pi1 = [cx + r_i * a1.cos(), y, cz + r_i * a1.sin()];
         let po0 = [cx + r_o * a0.cos(), y, cz + r_o * a0.sin()];
         let po1 = [cx + r_o * a1.cos(), y, cz + r_o * a1.sin()];
+        // CCW from above (+Y normal) for top face; CW (+Y reversed = -Y normal) for bottom
         if y >= 0.0 {
-            for pt in [pi0, po0, po1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
-            for pt in [pi0, po1, pi1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
-        } else {
             for pt in [pi0, po1, po0] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
             for pt in [pi0, pi1, po1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
+        } else {
+            for pt in [pi0, po0, po1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
+            for pt in [pi0, po1, pi1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
         }
     }
 }
