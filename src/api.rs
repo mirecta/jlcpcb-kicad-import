@@ -444,21 +444,26 @@ fn extract_pins(easyeda: &serde_json::Value) -> Vec<Pin> {
 
     if raw.is_empty() { return vec![]; }
 
-    // Centre on centroid of all wire-connection points
-    let cx = raw.iter().map(|(x, ..)| *x).sum::<f32>() / raw.len() as f32;
-    let cy = raw.iter().map(|(_, y, ..)| *y).sum::<f32>() / raw.len() as f32;
+    // Snap centroid to the nearest 5 EasyEDA units (= 50 mils).
+    // This shifts ALL coordinates — pins AND body graphics — by the same offset,
+    // so pin tips land on the global 50 mil grid with no gap to the body.
+    let snap5 = |v: f32| (v / 5.0).round() * 5.0;
+    let cx = snap5(raw.iter().map(|(x, ..)| *x).sum::<f32>() / raw.len() as f32);
+    let cy = snap5(raw.iter().map(|(_, y, ..)| *y).sum::<f32>() / raw.len() as f32);
 
-    const GRID: f32 = 1.27; // 50 mils
-    let snap = |v: f32| (v / GRID).round().max(1.0) * GRID;
+    // Also snap each pin position individually to 1.27 mm (50 mil) to absorb
+    // any residual misalignment from non-ideal EasyEDA symbol layouts.
+    let snap_mm = |v: f32| (v / 1.27).round() * 1.27;
+    let snap_len = |v: f32| (v / 1.27).round().max(1.0) * 1.27;
 
     raw.into_iter().map(|(x, y, angle, name, number, pin_type, stub_len)| Pin {
         name,
         number,
         pin_type,
-        x:  (x - cx) * SCALE,
-        y: -(y - cy) * SCALE,
+        x:  snap_mm((x - cx) * SCALE),
+        y:  snap_mm(-(y - cy) * SCALE),
         angle,
-        stub_len: snap(stub_len),
+        stub_len: snap_len(stub_len),
     }).collect()
 }
 
@@ -488,8 +493,9 @@ fn ee_pin_centroid(shapes: &[serde_json::Value]) -> (f32, f32) {
         }
     }
     if xs.is_empty() { return (0.0, 0.0); }
-    let cx = xs.iter().sum::<f32>() / xs.len() as f32;
-    let cy = ys.iter().sum::<f32>() / ys.len() as f32;
+    let snap5 = |v: f32| (v / 5.0).round() * 5.0;
+    let cx = snap5(xs.iter().sum::<f32>() / xs.len() as f32);
+    let cy = snap5(ys.iter().sum::<f32>() / ys.len() as f32);
     (cx, cy)
 }
 
