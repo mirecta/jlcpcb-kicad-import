@@ -647,24 +647,19 @@ fn extract_sym_graphics(easyeda: &serde_json::Value) -> Vec<SymGraphic> {
 
     let mut out: Vec<SymGraphic> = Vec::new();
 
-    for (i, shape) in shapes.iter().enumerate() {
-        if let Some(s) = shape.as_str() {
-            eprintln!("[sym_graphics] shape[{}]: {}", i, s);
-        }
-    }
-
     for shape in &shapes {
         let s = match shape.as_str() { Some(s) => s, None => continue };
         let (kind, _) = match s.split_once('~') { Some(p) => p, None => continue };
 
-        // Non-graphic shape types — skip
+        // Non-graphic shape types — skip (both legacy and EasyEDA Pro single-letter codes)
         match kind {
             "P" | "PIN" | "PAD" | "WIRE" | "NETLABEL" | "NETFLAG" |
-            "JUNCTION" | "TEXT" | "NOTE" | "ANNOTATION" | "SCHLIB" => continue,
+            "JUNCTION" | "TEXT" | "NOTE" | "ANNOTATION" | "SCHLIB" |
+            "W" | "N" | "T" | "D" | "J" => continue,  // EasyEDA Pro: wire, net, text, dot, junction
             _ => {}
         }
 
-        let p: Vec<&str> = s.splitn(10, '~').collect();
+        let p: Vec<&str> = s.split('~').collect();
 
         match kind {
             // ── Arc ────────────────────────────────────────────────────────────
@@ -694,20 +689,20 @@ fn extract_sym_graphics(easyeda: &serde_json::Value) -> Vec<SymGraphic> {
                 if pts.len() >= 2 { out.push(SymGraphic::Poly { pts, width, fill: true }); }
             }
 
-            // ── Circle ────────────────────────────────────────────────────────
-            "CIRCLE" => {
+            // ── Circle (legacy + EasyEDA Pro "C") ─────────────────────────────
+            "CIRCLE" | "C" => {
                 if p.len() < 4 { continue; }
                 let ecx: f32 = p[1].parse().unwrap_or(0.0);
                 let ecy: f32 = p[2].parse().unwrap_or(0.0);
                 let er:  f32 = p[3].parse().unwrap_or(0.0);
                 let width    = stroke_w(&p, 4);
-                let fill     = p.get(6).map(|s| !is_color(s) || (*s != "none" && !s.is_empty())).unwrap_or(false);
+                let fill     = p.get(5).map(|s| s.starts_with('#')).unwrap_or(false);
                 let c = t(ecx, ecy);
                 out.push(SymGraphic::Circle { cx: c[0], cy: c[1], r: er * S, width, fill });
             }
 
-            // ── Ellipse → use average radius as circle ────────────────────────
-            "ELLIPSE" => {
+            // ── Ellipse → average radius as circle ───────────────────────────
+            "ELLIPSE" | "E" => {
                 if p.len() < 5 { continue; }
                 let ecx: f32 = p[1].parse().unwrap_or(0.0);
                 let ecy: f32 = p[2].parse().unwrap_or(0.0);
@@ -718,8 +713,9 @@ fn extract_sym_graphics(easyeda: &serde_json::Value) -> Vec<SymGraphic> {
                 out.push(SymGraphic::Circle { cx: c[0], cy: c[1], r: (erx + ery) * 0.5 * S, width, fill: false });
             }
 
-            // ── Rectangle ────────────────────────────────────────────────────
+            // ── Rectangle (legacy RECT) ───────────────────────────────────────
             "RECT" | "RECTANGLE" => {
+                // RECT~x~y~width~height~strokeColor~fillColor~strokeWidth~...
                 if p.len() < 5 { continue; }
                 let ex: f32 = p[1].parse().unwrap_or(0.0);
                 let ey: f32 = p[2].parse().unwrap_or(0.0);
@@ -727,6 +723,21 @@ fn extract_sym_graphics(easyeda: &serde_json::Value) -> Vec<SymGraphic> {
                 let eh: f32 = p[4].parse().unwrap_or(0.0);
                 let width   = stroke_w(&p, 5);
                 let fill    = p.get(6).map(|s| s.starts_with('#')).unwrap_or(false);
+                let p0 = t(ex, ey); let p1 = t(ex + ew, ey + eh);
+                out.push(SymGraphic::Rect { x0: p0[0], y0: p0[1], x1: p1[0], y1: p1[1], width, fill });
+            }
+
+            // ── Rounded rectangle (EasyEDA Pro "R") ───────────────────────────
+            "R" => {
+                // R~x~y~rx~ry~width~height~strokeColor~fillColor~strokeWidth~...
+                if p.len() < 7 { continue; }
+                let ex: f32 = p[1].parse().unwrap_or(0.0);
+                let ey: f32 = p[2].parse().unwrap_or(0.0);
+                // p[3]=rx, p[4]=ry (corner radii — KiCad rect has no rounded corners)
+                let ew: f32 = p[5].parse().unwrap_or(0.0);
+                let eh: f32 = p[6].parse().unwrap_or(0.0);
+                let width   = stroke_w(&p, 7);
+                let fill    = p.get(8).map(|s| s.starts_with('#')).unwrap_or(false);
                 let p0 = t(ex, ey); let p1 = t(ex + ew, ey + eh);
                 out.push(SymGraphic::Rect { x0: p0[0], y0: p0[1], x1: p1[0], y1: p1[1], width, fill });
             }
@@ -750,7 +761,6 @@ fn extract_sym_graphics(easyeda: &serde_json::Value) -> Vec<SymGraphic> {
                 let data = p.get(1).copied().unwrap_or("");
                 let width = stroke_w(&p, 2);
                 let filled = is_filled(&p);
-                // If field 1 looks like an SVG path, try path parser first
                 if data.contains('M') || data.contains('L') {
                     for (pts_ee, is_closed) in parse_svg_d(data) {
                         let kpts: Vec<[f32; 2]> = pts_ee.iter().map(|(x, y)| t(*x, *y)).collect();
@@ -759,12 +769,11 @@ fn extract_sym_graphics(easyeda: &serde_json::Value) -> Vec<SymGraphic> {
                         }
                     }
                 } else {
-                    // Try space/comma separated coordinate pairs
                     let pts = pts_from_str(data);
                     if pts.len() >= 2 {
                         out.push(SymGraphic::Poly { pts, width, fill: filled });
                     } else {
-                        eprintln!("[sym_graphics] unhandled shape: {kind}");
+                        eprintln!("[sym_graphics] unhandled shape kind={kind:?} data={data:?}");
                     }
                 }
             }
