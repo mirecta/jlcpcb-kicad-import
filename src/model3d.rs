@@ -24,6 +24,7 @@ void main() {
 
 const FS: &str = "
 #version 140
+uniform float u_alpha;
 in vec3 v_col;
 in vec3 v_nrm;
 out vec4 o_col;
@@ -31,12 +32,11 @@ void main() {
     vec3 n  = normalize(v_nrm);
     vec3 L1 = normalize(vec3(1.0, 2.0, 1.5));
     vec3 L2 = normalize(vec3(-1.0, 1.5, -0.5));
-    vec3 L3 = normalize(vec3(0.0, -1.0, 0.5));  // soft fill from below
-    // Two-sided lighting: use abs() to light both sides of faces
+    vec3 L3 = normalize(vec3(0.0, -1.0, 0.5));
     float d = abs(dot(n, L1))
             + 0.45 * abs(dot(n, L2))
             + 0.20 * abs(dot(n, L3));
-    o_col = vec4(v_col * (0.45 + 0.55 * d), 1.0);
+    o_col = vec4(v_col * (0.45 + 0.55 * d), u_alpha);
 }
 ";
 
@@ -78,6 +78,9 @@ struct GlState {
     pcb_vao:    glow::VertexArray,
     pcb_vbo:    glow::Buffer,
     pcb_count:  i32,
+    edge_vao:   glow::VertexArray,
+    edge_vbo:   glow::Buffer,
+    edge_count: i32,
 }
 
 impl GlState {
@@ -127,16 +130,23 @@ impl GlState {
         let comp_vbo = gl.create_buffer().ok()?;
         upload_verts(gl, comp_vao, comp_vbo, &mesh.data);
 
-        // ── PCB + pads VAO ───────────────────────────────────────────────────
-        let pcb_data = build_pcb_and_pads(mesh.radius, mesh.xz_half, pads, drawings);
+        // ── PCB body VAO (opaque) ────────────────────────────────────────────
+        let pcb_data = build_pcb_body(mesh.radius, mesh.xz_half, pads, drawings);
         let pcb_vao = gl.create_vertex_array().ok()?;
         let pcb_vbo = gl.create_buffer().ok()?;
         upload_verts(gl, pcb_vao, pcb_vbo, &pcb_data);
+
+        // ── PCB edge VAO (transparent) ───────────────────────────────────────
+        let edge_data = build_pcb_edges(mesh.radius, mesh.xz_half);
+        let edge_vao = gl.create_vertex_array().ok()?;
+        let edge_vbo = gl.create_buffer().ok()?;
+        upload_verts(gl, edge_vao, edge_vbo, &edge_data);
 
         Some(GlState {
             program,
             comp_vao, comp_vbo, comp_count: mesh.count,
             pcb_vao,  pcb_vbo,  pcb_count: (pcb_data.len() / 9) as i32,
+            edge_vao, edge_vbo, edge_count: (edge_data.len() / 9) as i32,
         })
     }
 
@@ -221,7 +231,12 @@ impl GlState {
             gl.uniform_matrix_4_f32_slice(Some(&loc), false, &vp_mat.to_cols_array());
         }
 
-        // Draw PCB (model = identity, normal = identity)
+        // Set u_alpha = 1.0 for opaque geometry
+        if let Some(loc) = gl.get_uniform_location(self.program, "u_alpha") {
+            gl.uniform_1_f32(Some(&loc), 1.0);
+        }
+
+        // Draw PCB body (opaque — tessellated surfaces + pads + barrel)
         set_model(gl, self.program, &Mat4::IDENTITY, &Mat3::IDENTITY);
         gl.bind_vertex_array(Some(self.pcb_vao));
         gl.draw_arrays(glow::TRIANGLES, 0, self.pcb_count);
@@ -237,13 +252,28 @@ impl GlState {
         gl.bind_vertex_array(Some(self.comp_vao));
         gl.draw_arrays(glow::TRIANGLES, 0, self.comp_count);
 
+        // Draw PCB edges (semi-transparent) — rendered last after all opaque geometry
+        if self.edge_count > 0 {
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            gl.depth_mask(false); // don't write depth for transparent geometry
+            if let Some(loc) = gl.get_uniform_location(self.program, "u_alpha") {
+                gl.uniform_1_f32(Some(&loc), 0.35);
+            }
+            set_model(gl, self.program, &Mat4::IDENTITY, &Mat3::IDENTITY);
+            gl.bind_vertex_array(Some(self.edge_vao));
+            gl.draw_arrays(glow::TRIANGLES, 0, self.edge_count);
+            gl.depth_mask(true);
+            gl.disable(glow::BLEND);
+        }
+
         // Restore GL state for egui
         gl.bind_vertex_array(None);
         gl.use_program(None);
         gl.disable(glow::DEPTH_TEST);
         gl.disable(glow::SCISSOR_TEST);
-        gl.depth_mask(false);  // egui doesn't use depth writes
-        gl.enable(glow::BLEND); // egui needs blending for UI
+        gl.depth_mask(false);
+        gl.enable(glow::BLEND);
     }
 
     unsafe fn destroy(&self, gl: &glow::Context) {
@@ -252,6 +282,8 @@ impl GlState {
         gl.delete_buffer(self.comp_vbo);
         gl.delete_vertex_array(self.pcb_vao);
         gl.delete_buffer(self.pcb_vbo);
+        gl.delete_vertex_array(self.edge_vao);
+        gl.delete_buffer(self.edge_vbo);
     }
 }
 
@@ -553,42 +585,35 @@ fn build_model_mat(offset: [f32; 3], rotation: [f32; 3], scale: [f32; 3], center
 
 // ── PCB + pad geometry ────────────────────────────────────────────────────────
 
-fn build_pcb_and_pads(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[PcbDrawing]) -> Vec<f32> {
-    // PCB must contain both the pad extents and the 3D body XZ footprint.
-    const MARGIN: f32 = 3.0; // mm of board visible around the outermost feature
-    let pad_half = if pads.is_empty() {
-        0.0_f32
-    } else {
-        let max_x = pads.iter().map(|p| p.cx.abs() + p.w * 0.5).fold(0.0_f32, f32::max);
-        let max_z = pads.iter().map(|p| p.cz.abs() + p.h * 0.5).fold(0.0_f32, f32::max);
-        max_x.max(max_z)
+fn build_pcb_body(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[PcbDrawing]) -> Vec<f32> {
+    const MARGIN: f32 = 3.0;
+    let pad_half = if pads.is_empty() { 0.0_f32 } else {
+        let mx = pads.iter().map(|p| p.cx.abs() + p.w * 0.5).fold(0.0_f32, f32::max);
+        let mz = pads.iter().map(|p| p.cz.abs() + p.h * 0.5).fold(0.0_f32, f32::max);
+        mx.max(mz)
     };
-    let half = pad_half.max(mesh_xz_half).max(radius * 0.5) + MARGIN;
+    let half  = pad_half.max(mesh_xz_half).max(radius * 0.5) + MARGIN;
     let thick = 1.6_f32;
     let mut v: Vec<f32> = Vec::new();
 
-    // top surface at Y=0 — KiCad-style PCB green
-    quad_y(&mut v, -half, half, -half, half, 0.0, [0.10, 0.42, 0.12]);
-    // bottom surface at Y=-thick
-    quad_y(&mut v, half, -half, -half, half, -thick, [0.07, 0.30, 0.09]);
-    // 4 edge faces
-    let ec = [0.08, 0.32, 0.10_f32];
-    // front (z = -half): (x0,y0,z0) → (x1,y0,z1) → (x1,y1,z1) → (x0,y1,z0)
-    rect_xz_face(&mut v, -half, -thick, -half,  half, 0.0, -half, [0.0, 0.0, -1.0], ec);
-    rect_xz_face(&mut v,  half, -thick,  half, -half, 0.0,  half, [0.0, 0.0,  1.0], ec);
-    rect_xz_face(&mut v,  half, -thick, -half,  half, 0.0,  half, [1.0, 0.0,  0.0], ec);
-    rect_xz_face(&mut v, -half, -thick,  half, -half, 0.0, -half, [-1.0, 0.0, 0.0], ec);
+    // Collect drill holes for surface tessellation
+    let holes: Vec<(f32, f32, f32)> = pads.iter()
+        .filter(|p| p.drill > 0.0)
+        .map(|p| (p.cx, p.cz, p.drill * 0.5))
+        .collect();
 
-    // Pads: flat quads/circles at Y=0.05 (above PCB to avoid z-fight)
-    let py  = 0.05_f32;
-    let pc  = [0.85, 0.68, 0.08_f32]; // copper/gold
-    let hc  = [0.08, 0.04, 0.02_f32]; // dark hole interior
+    // Top surface (Y=0) and bottom surface (Y=-thick) — tessellated with real holes
+    let top_green = [0.10_f32, 0.42, 0.12];
+    let bot_green = [0.07_f32, 0.30, 0.09];
+    quad_y_holed(&mut v, half, &holes, 0.0,    top_green);
+    quad_y_holed(&mut v, half, &holes, -thick, bot_green);
 
-    let draw_pad_shape = |v: &mut Vec<f32>, pad: &PadInfo, hw: f32, hh: f32, y: f32, c: [f32; 3]| {
+    let pc  = [0.85_f32, 0.68, 0.08]; // copper
+
+    // Pads and through-hole barrels
+    let draw_pad = |v: &mut Vec<f32>, pad: &PadInfo, hw: f32, hh: f32, y: f32, c: [f32; 3]| {
         match pad.shape.as_str() {
-            "circle" => {
-                circle_y(v, pad.cx, pad.cz, hw.max(hh), y, c);
-            }
+            "circle" => circle_y(v, pad.cx, pad.cz, hw.max(hh), y, c),
             "oval" => {
                 if (hw - hh).abs() < 0.01 {
                     circle_y(v, pad.cx, pad.cz, hw, y, c);
@@ -602,33 +627,29 @@ fn build_pcb_and_pads(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings
                     circle_y(v, pad.cx, pad.cz + hh - hw, hw, y, c);
                 }
             }
-            _ => {
-                quad_y(v, pad.cx - hw, pad.cx + hw, pad.cz - hh, pad.cz + hh, y, c);
-            }
+            _ => quad_y(v, pad.cx - hw, pad.cx + hw, pad.cz - hh, pad.cz + hh, y, c),
         }
     };
 
     for pad in pads {
         let hw = pad.w * 0.5;
         let hh = pad.h * 0.5;
-
         if pad.drill > 0.0 {
-            let dr = pad.drill * 0.5; // hole radius
-            // Top annular ring: full copper pad, then overdraw hole
-            draw_pad_shape(&mut v, pad, hw, hh, py, pc);
-            circle_y(&mut v, pad.cx, pad.cz, dr, py + 0.01, hc);
+            let dr = pad.drill * 0.5;
             // Copper barrel through the board
-            cylinder_hole(&mut v, pad.cx, pad.cz, dr, 0.0, -thick, pc);
-            // Bottom annular ring
-            let by = -thick - 0.05;
-            draw_pad_shape(&mut v, pad, hw, hh, by, pc);
-            circle_y_down(&mut v, pad.cx, pad.cz, dr, by - 0.01, hc);
+            cylinder_hole(&mut v, pad.cx, pad.cz, dr, 0.001, -thick, pc);
+            // Barrel caps: visible copper discs at top and bottom of hole
+            circle_y(     &mut v, pad.cx, pad.cz, dr,  0.002, pc);
+            circle_y_down(&mut v, pad.cx, pad.cz, dr, -thick - 0.002, pc);
+            // Annular copper pads (top and bottom)
+            draw_pad(&mut v, pad, hw, hh,  0.05,          pc);
+            draw_pad(&mut v, pad, hw, hh, -thick - 0.05,  pc);
         } else {
-            draw_pad_shape(&mut v, pad, hw, hh, py, pc);
+            draw_pad(&mut v, pad, hw, hh, 0.05, pc);
         }
     }
 
-    // Drawing shapes (silkscreen / fab): flat tris at Y=0.08, just above pads
+    // Silkscreen / fab drawings at Y=0.08
     let draw_y = 0.08_f32;
     let draw_n = [0.0_f32, 1.0, 0.0];
     for draw in drawings {
@@ -642,6 +663,19 @@ fn build_pcb_and_pads(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings
         }
     }
 
+    v
+}
+
+fn build_pcb_edges(radius: f32, mesh_xz_half: f32) -> Vec<f32> {
+    const MARGIN: f32 = 3.0;
+    let half  = mesh_xz_half.max(radius * 0.5) + MARGIN;
+    let thick = 1.6_f32;
+    let mut v: Vec<f32> = Vec::new();
+    let ec = [0.08_f32, 0.32, 0.10]; // edge green
+    rect_xz_face(&mut v, -half, -thick, -half,  half, 0.0, -half, [0.0, 0.0, -1.0], ec);
+    rect_xz_face(&mut v,  half, -thick,  half, -half, 0.0,  half, [0.0, 0.0,  1.0], ec);
+    rect_xz_face(&mut v,  half, -thick, -half,  half, 0.0,  half, [1.0, 0.0,  0.0], ec);
+    rect_xz_face(&mut v, -half, -thick,  half, -half, 0.0, -half, [-1.0, 0.0, 0.0], ec);
     v
 }
 
@@ -707,6 +741,37 @@ fn cylinder_hole(v: &mut Vec<f32>, cx: f32, cz: f32, r: f32, y_top: f32, y_bot: 
         // Two triangles per segment
         for (p, n) in [(t0,n0),(b0,n0),(b1,n1)] { v.extend_from_slice(&p); v.extend_from_slice(&n); v.extend_from_slice(&c); }
         for (p, n) in [(t0,n0),(b1,n1),(t1,n1)] { v.extend_from_slice(&p); v.extend_from_slice(&n); v.extend_from_slice(&c); }
+    }
+}
+
+// PCB surface quad in XZ plane with circular drill holes cut out (grid tessellation)
+fn quad_y_holed(v: &mut Vec<f32>, half: f32, holes: &[(f32, f32, f32)], y: f32, c: [f32; 3]) {
+    const N: i32 = 96;
+    let step = (2.0 * half) / N as f32;
+    let nrm: [f32; 3] = [0.0, if y >= 0.0 { 1.0 } else { -1.0 }, 0.0];
+    for i in 0..N {
+        for j in 0..N {
+            let x0 = -half + i as f32 * step;
+            let x1 = x0 + step;
+            let z0 = -half + j as f32 * step;
+            let z1 = z0 + step;
+            let cx = (x0 + x1) * 0.5;
+            let cz = (z0 + z1) * 0.5;
+            let in_hole = holes.iter().any(|(hx, hz, hr)| {
+                let dx = cx - hx; let dz = cz - hz;
+                dx * dx + dz * dz < hr * hr
+            });
+            if in_hole { continue; }
+            let pts = [[x0,y,z0],[x1,y,z0],[x1,y,z1],[x0,y,z1]];
+            let order: [(usize,usize,usize); 2] = if y >= 0.0 { [(0,1,2),(0,2,3)] } else { [(0,2,1),(0,3,2)] };
+            for (a,b,ci) in order {
+                for &k in &[a, b, ci] {
+                    v.extend_from_slice(&pts[k]);
+                    v.extend_from_slice(&nrm);
+                    v.extend_from_slice(&c);
+                }
+            }
+        }
     }
 }
 
