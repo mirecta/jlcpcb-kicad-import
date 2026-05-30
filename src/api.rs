@@ -449,14 +449,14 @@ fn extract_pins(easyeda: &serde_json::Value) -> Vec<Pin> {
     let cy = raw.iter().map(|(_, y, ..)| *y).sum::<f32>() / raw.len() as f32;
 
     const GRID: f32 = 1.27; // 50 mils
-    let snap = |v: f32| (v / GRID).round() * GRID;
+    let snap = |v: f32| (v / GRID).round().max(1.0) * GRID;
 
     raw.into_iter().map(|(x, y, angle, name, number, pin_type, stub_len)| Pin {
         name,
         number,
         pin_type,
-        x:  snap((x - cx) * SCALE),
-        y:  snap(-(y - cy) * SCALE),
+        x:  (x - cx) * SCALE,
+        y: -(y - cy) * SCALE,
         angle,
         stub_len: snap(stub_len),
     }).collect()
