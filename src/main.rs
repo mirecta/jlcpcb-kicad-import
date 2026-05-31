@@ -1403,7 +1403,7 @@ fn show_symbol_preview(
         painter.circle_filled(tip, 2.0, pin_col);
 
         // Pin name — hidden for passives (R/C/L) or when checkbox is set
-        let hide_pin_names = matches!(ref_designator, "R" | "C" | "L") || hide_pin_names_flag;
+        let hide_pin_names = matches!(ref_designator, "R" | "C" | "L" | "Y") || hide_pin_names_flag;
         if !hide_pin_names && pin.name != pin.number && !pin.name.is_empty() {
             let (na, no) = match pin.angle {
                 0   => (egui::Align2::LEFT_CENTER,   egui::vec2( 3.0,  0.0)),

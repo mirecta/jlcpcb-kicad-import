@@ -242,6 +242,7 @@ fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32;
         let cat = c.category.to_lowercase();
         cat.contains("capacitor") || cat.contains("resistor")
             || cat.contains("inductor") || cat.contains("ferrite") || cat.contains("choke")
+            || cat.contains("crystal") || cat.contains("oscillator") || cat.contains("resonator")
     };
     let pin_names_clause = if is_passive || hide_pin_names {
         "(pin_names (offset 1.016) (hide yes))"
