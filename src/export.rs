@@ -148,6 +148,8 @@ pub fn electrical_value(c: &Component) -> String {
         if let Some(v) = find("Resistance") { return v.to_string(); }
     } else if cat.contains("inductor") || cat.contains("ferrite") || cat.contains("choke") {
         if let Some(v) = find("Inductance") { return v.to_string(); }
+    } else if cat.contains("crystal") || cat.contains("oscillator") || cat.contains("resonator") {
+        if let Some(v) = find("Frequency") { return v.to_string(); }
     }
     c.value.clone()
 }
