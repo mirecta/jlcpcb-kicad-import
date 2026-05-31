@@ -423,6 +423,11 @@ impl eframe::App for App {
                     self.state.wrl_bytes  = wrl;
                     self.state.step_bytes = step;
                     self.state.status = format!("Loaded: {} ({}){}", comp.value, comp.lcsc_id, model_status);
+                    // Auto-check "Hide pin names" for passives and crystals
+                    let cat = comp.category.to_lowercase();
+                    self.state.hide_pin_names = cat.contains("capacitor") || cat.contains("resistor")
+                        || cat.contains("inductor") || cat.contains("ferrite") || cat.contains("choke")
+                        || cat.contains("crystal") || cat.contains("oscillator") || cat.contains("resonator");
                     self.state.component = Some(comp);
                 }
                 BgMsg::DetailErr(e) => {
