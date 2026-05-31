@@ -150,6 +150,7 @@ struct AppState {
     import_footprint: bool,
     import_package: bool,
     hide_pin_numbers: bool,
+    hide_pin_names:   bool,
 
     // Filters
     basic_only: bool,
@@ -193,6 +194,7 @@ impl App {
         state.import_footprint = true;
         state.import_package = true;
         state.hide_pin_numbers = true;
+        state.hide_pin_names   = false;
         App { state }
     }
 
@@ -802,6 +804,7 @@ impl eframe::App for App {
                             self.state.val_pos,
                             &mut self.state.sym_pz,
                             egui::Vec2::new(460.0, 380.0),
+                            self.state.hide_pin_names,
                         );
                     } else if let Some(tex) = &self.state.symbol_texture {
                         // No pin data — show EasyEDA SVG as fallback
@@ -1125,6 +1128,7 @@ impl eframe::App for App {
                     ui.horizontal(|ui| {
                         ui.add_space(16.0);
                         ui.checkbox(&mut self.state.hide_pin_numbers, "Hide pin numbers");
+                        ui.checkbox(&mut self.state.hide_pin_names,   "Hide pin names");
                     });
                 }
                 ui.add_space(4.0);
@@ -1148,7 +1152,8 @@ impl eframe::App for App {
                         if self.state.import_symbol {
                             export::write_symbol(&paths, &comp, &lib_name,
                                 self.state.ref_pos, self.state.val_pos,
-                                self.state.hide_pin_numbers)?;
+                                self.state.hide_pin_numbers,
+                                self.state.hide_pin_names)?;
                         }
 
                         // Import footprint
@@ -1256,6 +1261,7 @@ fn show_symbol_preview(
     val_pos: [f32; 2],
     pz: &mut PanZoom,
     display_size: egui::Vec2,
+    hide_pin_names_flag: bool,
 ) {
 
     let (rect, response) = ui.allocate_exact_size(display_size, egui::Sense::click_and_drag());
@@ -1396,8 +1402,8 @@ fn show_symbol_preview(
         painter.line_segment([tip, body_pt], egui::Stroke::new(1.0, pin_col));
         painter.circle_filled(tip, 2.0, pin_col);
 
-        // Pin name — hidden for passives (R/C/L), otherwise just inside stub end
-        let hide_pin_names = matches!(ref_designator, "R" | "C" | "L");
+        // Pin name — hidden for passives (R/C/L) or when checkbox is set
+        let hide_pin_names = matches!(ref_designator, "R" | "C" | "L") || hide_pin_names_flag;
         if !hide_pin_names && pin.name != pin.number && !pin.name.is_empty() {
             let (na, no) = match pin.angle {
                 0   => (egui::Align2::LEFT_CENTER,   egui::vec2( 3.0,  0.0)),
