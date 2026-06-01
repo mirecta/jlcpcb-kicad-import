@@ -1015,6 +1015,34 @@ impl eframe::App for App {
                             }
                         }
                     }
+
+                    // Save STEP button
+                    let has_step = self.state.step_bytes.is_some();
+                    if ui.add_enabled(has_step, egui::Button::new("Save STEP...")).clicked() {
+                        if let Some(step_bytes) = &self.state.step_bytes {
+                            let default_name = if let Some(comp) = &self.state.component {
+                                format!("{}.step", comp.lcsc_id)
+                            } else {
+                                "model.step".to_string()
+                            };
+
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_file_name(&default_name)
+                                .add_filter("STEP files", &["step", "stp"])
+                                .save_file()
+                            {
+                                match std::fs::write(&path, step_bytes) {
+                                    Ok(()) => {
+                                        self.state.status = format!("✓ Saved STEP to {}",
+                                            path.file_name().unwrap_or_default().to_string_lossy());
+                                    }
+                                    Err(e) => {
+                                        self.state.status = format!("⚠ Failed to save STEP: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 });
                 ui.add_space(4.0);
 
