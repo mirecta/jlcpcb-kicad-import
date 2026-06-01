@@ -173,11 +173,7 @@ pub fn ref_letter(category: &str) -> &'static str {
 
 fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32; 2], hide_pin_numbers: bool, hide_pin_names: bool) -> String {
     let name = sanitize_name(&c.value);
-    let footprint_ref = format!(
-        "{}:{}",
-        lib_name,
-        if c.package_detail.is_empty() { &c.package } else { &c.package_detail }
-    );
+    let footprint_ref = format!("{}:{}", lib_name, package_name(c));
 
     let mut props = Vec::new();
     let mut y = (val_pos[1] - 1.27f32).min(ref_pos[1] - 1.27);
