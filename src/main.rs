@@ -405,12 +405,12 @@ impl eframe::App for App {
                     let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
                         .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
                         .collect();
-                    if let Some(ref bytes) = wrl {
-                        // VRML from EasyEDA is Z-up; rotate -90° around X to Y-up viewer
-                        self.state.model_viewer.load(bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
-                    } else if let Some(ref bytes) = step {
-                        // Load STEP in native orientation - user can adjust rotation in UI if needed
+                    // Prefer STEP over WRL - more standard, better colors, consistent orientation
+                    if let Some(ref bytes) = step {
                         self.state.model_viewer.load_step(bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
+                    } else if let Some(ref bytes) = wrl {
+                        // VRML from EasyEDA is Y-up; rotate +90° around X to match viewer
+                        self.state.model_viewer.load(bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
                     } else {
                         self.state.model_viewer.has_model = false;
                     }
