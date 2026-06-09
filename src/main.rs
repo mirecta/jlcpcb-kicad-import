@@ -358,13 +358,13 @@ impl eframe::App for App {
                 }
                 BgMsg::DetailDone(comp, wrl, step) => {
                     if let Some(svg) = &comp.symbol_svg {
-                        if let Ok(img) = preview::svg_to_image(svg, 400, 300) {
+                        if let Ok(img) = preview::svg_to_image(svg, 1200, 900) {
                             self.state.symbol_texture =
                                 Some(ctx.load_texture("symbol", img, Default::default()));
                         }
                     }
                     if let Some(svg) = &comp.footprint_svg {
-                        if let Ok(img) = preview::svg_to_image(svg, 400, 300) {
+                        if let Ok(img) = preview::svg_to_image(svg, 1200, 900) {
                             self.state.footprint_texture =
                                 Some(ctx.load_texture("footprint", img, Default::default()));
                         }
