@@ -1086,6 +1086,7 @@ fn step_shell_colors(text: &str) -> std::collections::HashMap<u64, [f32; 3]> {
         "SURFACE_STYLE_FILL_AREA",
         "SURFACE_SIDE_STYLE",
         "SURFACE_STYLE_USAGE",
+        "CURVE_STYLE",
         "PRESENTATION_STYLE_ASSIGNMENT",
     ];
     for _ in 0..2 {
