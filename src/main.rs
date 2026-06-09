@@ -969,7 +969,8 @@ impl eframe::App for App {
                                         let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
                                             .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
                                             .collect();
-                                        self.state.model_viewer.load_step(&bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
+                                        // Custom STEP files are typically Z-up already (no rotation needed)
+                                        self.state.model_viewer.load_step(&bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
                                         self.state.step_bytes = Some(bytes);
                                         self.state.status = format!("✓ Loaded custom STEP: {}",
                                             path.file_name().unwrap_or_default().to_string_lossy());
