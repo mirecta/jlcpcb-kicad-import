@@ -409,8 +409,8 @@ impl eframe::App for App {
                         // VRML from EasyEDA is Z-up; rotate -90° around X to Y-up viewer
                         self.state.model_viewer.load(bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
                     } else if let Some(ref bytes) = step {
-                        // STEP (KiCad) is also Z-up; same rotation needed
-                        self.state.model_viewer.load_step(bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
+                        // Load STEP in native orientation - user can adjust rotation in UI if needed
+                        self.state.model_viewer.load_step(bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
                     } else {
                         self.state.model_viewer.has_model = false;
                     }
