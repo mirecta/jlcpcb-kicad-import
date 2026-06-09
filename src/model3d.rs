@@ -1107,10 +1107,10 @@ fn step_shell_colors(text: &str) -> std::collections::HashMap<u64, [f32; 3]> {
         }
     }
 
-    // Build face_id → color from STYLED_ITEM (last ref = shape, rest = style)
+    // Build face_id → color from STYLED_ITEM and OVER_RIDING_STYLED_ITEM
     let mut face_colors: HashMap<u64, [f32; 3]> = HashMap::new();
     for (&_id, name) in &entity_name {
-        if name != "STYLED_ITEM" { continue; }
+        if name != "STYLED_ITEM" && name != "OVER_RIDING_STYLED_ITEM" { continue; }
         let refs = entity_refs.get(&_id).cloned().unwrap_or_default();
         if refs.len() < 2 { continue; }
         let shape_ref = *refs.last().unwrap();
