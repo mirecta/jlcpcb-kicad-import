@@ -5,12 +5,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    // Check if OCCT is available
-    let occt_available = Command::new("pkg-config")
-        .args(&["--exists", "occt"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    // Check if OCCT headers are available (Ubuntu/Debian path)
+    let occt_include = PathBuf::from("/usr/include/opencascade");
+    let occt_available = occt_include.exists();
 
     if !occt_available {
         println!("cargo:warning=OpenCASCADE not found - STEP colors will use fallback (dominant per shell)");
@@ -20,19 +17,21 @@ fn main() {
         return;
     }
 
-    // Get OCCT compile flags
-    let cflags = Command::new("pkg-config")
-        .args(&["--cflags", "occt"])
-        .output()
-        .expect("Failed to get OCCT cflags");
-    let cflags_str = String::from_utf8(cflags.stdout).unwrap();
-
-    // Get OCCT link flags
-    let libs = Command::new("pkg-config")
-        .args(&["--libs", "occt"])
-        .output()
-        .expect("Failed to get OCCT libs");
-    let libs_str = String::from_utf8(libs.stdout).unwrap();
+    // Ubuntu/Debian OCCT 7.8 paths (no pkg-config provided)
+    let cflags_str = format!("-I{}", occt_include.display());
+    let occt_libs = vec![
+        // Core libraries
+        "TKernel", "TKMath", "TKG2d", "TKG3d", "TKGeomBase", "TKBRep",
+        // Data Exchange (STEP support)
+        "TKDESTEP", "TKXSBase", "TKDE",
+        // XCAF (colors and attributes)
+        "TKXCAF", "TKLCAF", "TKCAF", "TKVCAF", "TKCDF",
+        // Modeling and algorithms
+        "TKMesh", "TKBO", "TKPrim", "TKHLR", "TKTopAlgo", "TKGeomAlgo",
+        "TKShHealing", "TKOffset", "TKFillet", "TKBool",
+        // Visualization
+        "TKV3d", "TKService",
+    ];
 
     // Compile C++ wrapper
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -73,16 +72,12 @@ fn main() {
     println!("cargo:rustc-link-lib=static=step_occ");
 
     // Link OCCT libraries
-    for lib in libs_str.split_whitespace() {
-        if lib.starts_with("-l") {
-            println!("cargo:rustc-link-lib={}", &lib[2..]);
-        } else if lib.starts_with("-L") {
-            println!("cargo:rustc-link-search=native={}", &lib[2..]);
-        }
+    for lib in &occt_libs {
+        println!("cargo:rustc-link-lib=dylib={}", lib);
     }
 
     // Link standard C++ library
-    println!("cargo:rustc-link-lib=stdc++");
+    println!("cargo:rustc-link-lib=dylib=stdc++");
 
-    println!("cargo:warning=OpenCASCADE wrapper compiled successfully!");
+    println!("cargo:warning=✓ OpenCASCADE wrapper compiled successfully!");
 }

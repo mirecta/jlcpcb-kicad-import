@@ -100,18 +100,18 @@ ColoredMesh* step_parse_with_colors(const char* data, int data_len) {
                 // Get transformation
                 gp_Trsf transform = loc.Transformation();
 
-                // Extract triangles
-                const TColgp_Array1OfPnt& nodes = triangulation->Nodes();
-                const Poly_Array1OfTriangle& triangles = triangulation->Triangles();
+                // Extract triangles (OCCT 7.8 API)
+                const Standard_Integer nbNodes = triangulation->NbNodes();
+                const Standard_Integer nbTriangles = triangulation->NbTriangles();
 
-                for (int t = 1; t <= triangles.Length(); t++) {
-                    const Poly_Triangle& tri = triangles(t);
+                for (int t = 1; t <= nbTriangles; t++) {
+                    const Poly_Triangle& tri = triangulation->Triangle(t);
                     int n1, n2, n3;
                     tri.Get(n1, n2, n3);
 
-                    gp_Pnt p1 = nodes(n1).Transformed(transform);
-                    gp_Pnt p2 = nodes(n2).Transformed(transform);
-                    gp_Pnt p3 = nodes(n3).Transformed(transform);
+                    gp_Pnt p1 = triangulation->Node(n1).Transformed(transform);
+                    gp_Pnt p2 = triangulation->Node(n2).Transformed(transform);
+                    gp_Pnt p3 = triangulation->Node(n3).Transformed(transform);
 
                     // Compute face normal
                     gp_Vec v1(p1, p2);

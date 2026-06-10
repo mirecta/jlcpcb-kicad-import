@@ -25,6 +25,7 @@ arboard = "3"
 image = { version = "0.25", features = ["png"] }
 truck-stepio = "0.3"
 truck-meshalgo = "0.4"
+libc = "0.2"
 
 [features]
 default = []

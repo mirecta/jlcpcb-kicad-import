@@ -2352,6 +2352,7 @@ dependencies = [
  "egui_extras",
  "glam",
  "image",
+ "libc",
  "reqwest",
  "resvg",
  "rfd",
