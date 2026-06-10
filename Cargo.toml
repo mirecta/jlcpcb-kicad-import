@@ -26,6 +26,13 @@ image = { version = "0.25", features = ["png"] }
 truck-stepio = "0.3"
 truck-meshalgo = "0.4"
 
+[features]
+default = []
+opencascade = []
+
+[build-dependencies]
+# No dependencies needed - build.rs uses system tools
+
 [profile.release]
 opt-level = 3
 lto = true

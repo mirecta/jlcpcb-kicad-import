@@ -4,6 +4,9 @@ mod model3d;
 mod preview;
 mod settings;
 
+#[cfg(feature = "opencascade")]
+mod step_occ_ffi;
+
 use api::{Component, Pin, SearchResult};
 use eframe::egui;
 use egui::TextureHandle;
