@@ -413,39 +413,31 @@ impl ModelViewer {
             ui.ctx().request_repaint();
         }
 
-        // Middle-drag: pan in camera plane
-        if response.contains_pointer() {
-            let mid_delta = ui.input(|i| {
-                if i.pointer.button_down(egui::PointerButton::Middle) {
-                    i.pointer.delta()
-                } else {
-                    egui::Vec2::ZERO
-                }
-            });
-            if mid_delta.length_sq() > 0.0 {
-                let gd = self.gl_data.lock().unwrap();
-                let world_per_px = gd.radius * self.zoom / size.x;
-                drop(gd);
+        // Middle-drag: pan in camera plane (works even when cursor leaves widget)
+        if response.dragged_by(egui::PointerButton::Middle) {
+            let mid_delta = response.drag_delta();
+            let gd = self.gl_data.lock().unwrap();
+            let world_per_px = gd.radius * self.zoom / size.x;
+            drop(gd);
 
-                // TRUE 2D pan: move in plane perpendicular to view direction
-                // Calculate view direction from camera to target
-                let dist = world_per_px * size.x / self.zoom;
-                let cam_offset = Vec3::new(
-                    dist * self.pitch.cos() * self.yaw.sin(),
-                    dist * self.pitch.cos() * self.yaw.cos(),
-                    dist * self.pitch.sin(),
-                );
-                let view_dir = -cam_offset.normalize();
+            // TRUE 2D pan: move in plane perpendicular to view direction
+            // Calculate view direction from camera to target
+            let dist = world_per_px * size.x / self.zoom;
+            let cam_offset = Vec3::new(
+                dist * self.pitch.cos() * self.yaw.sin(),
+                dist * self.pitch.cos() * self.yaw.cos(),
+                dist * self.pitch.sin(),
+            );
+            let view_dir = -cam_offset.normalize();
 
-                // Screen right = perpendicular to view direction and world Z
-                let right = view_dir.cross(Vec3::Z).normalize();
-                // Screen up = perpendicular to view direction and right
-                let up = right.cross(view_dir).normalize();
+            // Screen right = perpendicular to view direction and world Z
+            let right = view_dir.cross(Vec3::Z).normalize();
+            // Screen up = perpendicular to view direction and right
+            let up = right.cross(view_dir).normalize();
 
-                self.cam_pan -= right * (mid_delta.x * world_per_px)
-                              - up    * (mid_delta.y * world_per_px);
-                ui.ctx().request_repaint();
-            }
+            self.cam_pan -= right * (mid_delta.x * world_per_px)
+                          - up    * (mid_delta.y * world_per_px);
+            ui.ctx().request_repaint();
         }
 
         // Scroll: zoom — consume event so the parent ScrollArea doesn't also move.
