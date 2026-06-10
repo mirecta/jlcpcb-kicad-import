@@ -104,12 +104,6 @@ pub fn write_step_model(paths: &LibPaths, component: &Component, step_bytes: &[u
     Ok(())
 }
 
-pub fn write_stl_model(paths: &LibPaths, component: &Component, stl_bytes: &[u8]) -> Result<()> {
-    let f = paths.model_dir.join(format!("{}.stl", package_name(component)));
-    std::fs::write(&f, stl_bytes)?;
-    Ok(())
-}
-
 // ── Symbol builder ────────────────────────────────────────────────────────────
 
 fn prop(name: &str, value: &str, at_y: f32, show: bool, _hide_name: bool) -> String {

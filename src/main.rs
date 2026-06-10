@@ -122,7 +122,6 @@ struct AppState {
     component: Option<Component>,
     wrl_bytes: Option<Vec<u8>>,   // VRML 2.0 bytes (converted from EasyEDA OBJ)
     step_bytes: Option<Vec<u8>>,  // raw STEP binary
-    stl_bytes: Option<Vec<u8>>,   // raw STL binary
     symbol_texture: Option<TextureHandle>,
     footprint_texture: Option<TextureHandle>,
 
@@ -237,7 +236,6 @@ impl App {
         self.state.footprint_texture = None;
         self.state.wrl_bytes = None;
         self.state.step_bytes = None;
-        self.state.stl_bytes = None;
         self.state.status = format!("Loading {}…", lcsc_id);
         let ctx = ctx.clone();
         self.spawn(move |tx| {
@@ -399,7 +397,7 @@ impl eframe::App for App {
                         .map(|p| {
                             let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
                             let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
-                            model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone(), drill: p.drill }
+                            model3d::PadInfo { cx: p.cx, cy: p.cy, w, h, shape: p.shape.clone(), drill: p.drill }
                         })
                         .collect();
                     let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
@@ -407,9 +405,9 @@ impl eframe::App for App {
                         .collect();
                     // Prefer STEP over WRL - better format, more standard
                     if let Some(ref bytes) = step {
-                        // JLCPCB STEP files are Y-up; rotate +90° around X to match viewer (Z-up)
+                        // Load STEP as-is, no rotation - viewer is Z-up to match
                         // Don't center - JLCPCB files have correct origin for pad alignment
-                        self.state.model_viewer.load_step(bytes, &pads, &drawings, [90.0, 0.0, 0.0], false);
+                        self.state.model_viewer.load_step(bytes, &pads, &drawings, [0.0, 0.0, 0.0], false);
                     } else if let Some(ref bytes) = wrl {
                         // VRML from JLCPCB is Y-up; rotate +90° around X to match viewer (Z-up)
                         self.state.model_viewer.load(bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
@@ -440,7 +438,6 @@ impl eframe::App for App {
                     self.state.footprint_texture = None;
                     self.state.wrl_bytes = None;
                     self.state.step_bytes = None;
-                    self.state.stl_bytes = None;
                     self.state.model_viewer.has_model = false;
                 }
                 BgMsg::RefreshProgress(current, total) => {
@@ -767,8 +764,8 @@ impl eframe::App for App {
             };
 
             egui::ScrollArea::both().show(ui, |ui| {
-                // Use horizontal scrollbar for narrow windows instead of overflowing
-                ui.set_min_width(600.0);
+                // Force min width for 2-column layout - prevents attr table overlap
+                ui.set_min_width(1000.0);
                 // Header
                 ui.heading(&comp.value);
                 ui.label(format!("{} | {} | {}", comp.lcsc_id, comp.package, comp.manufacturer));
@@ -965,15 +962,14 @@ impl eframe::App for App {
                                             .map(|p| {
                                                 let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
                                                 let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
-                                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone(), drill: p.drill }
+                                                model3d::PadInfo { cx: p.cx, cy: p.cy, w, h, shape: p.shape.clone(), drill: p.drill }
                                             })
                                             .collect();
                                         let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
                                             .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
                                             .collect();
-                                        // Custom STEP files are typically Z-up already (no rotation needed)
-                                        // Center custom files since origin may not align with pads
-                                        self.state.model_viewer.load_step(&bytes, &pads, &drawings, [0.0, 0.0, 0.0], true);
+                                        // Load STEP as-is, no rotation or centering
+                                        self.state.model_viewer.load_step(&bytes, &pads, &drawings, [0.0, 0.0, 0.0], false);
                                         self.state.step_bytes = Some(bytes);
                                         self.state.status = format!("✓ Loaded custom STEP: {}",
                                             path.file_name().unwrap_or_default().to_string_lossy());
@@ -983,38 +979,6 @@ impl eframe::App for App {
                                 }
                                 Err(e) => {
                                     self.state.status = format!("⚠ Failed to load STEP: {}", e);
-                                }
-                            }
-                        }
-                    }
-                    if ui.button("Load custom STL...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("STL files", &["stl", "STL"])
-                            .pick_file()
-                        {
-                            match std::fs::read(&path) {
-                                Ok(bytes) => {
-                                    if let Some(comp) = &self.state.component {
-                                        let pads: Vec<model3d::PadInfo> = comp.pads.iter()
-                                            .map(|p| {
-                                                let rotated = (p.rotation % 180.0 - 90.0).abs() < 45.0;
-                                                let (w, h) = if rotated { (p.h, p.w) } else { (p.w, p.h) };
-                                                model3d::PadInfo { cx: p.cx, cz: p.cy, w, h, shape: p.shape.clone(), drill: p.drill }
-                                            })
-                                            .collect();
-                                        let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
-                                            .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
-                                            .collect();
-                                        self.state.model_viewer.load_stl(&bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
-                                        self.state.stl_bytes = Some(bytes);
-                                        self.state.status = format!("✓ Loaded custom STL: {}",
-                                            path.file_name().unwrap_or_default().to_string_lossy());
-                                    } else {
-                                        self.state.status = "⚠ Load a component first".to_string();
-                                    }
-                                }
-                                Err(e) => {
-                                    self.state.status = format!("⚠ Failed to load STL: {}", e);
                                 }
                             }
                         }
@@ -1173,13 +1137,11 @@ impl eframe::App for App {
                     let lib_name = self.state.settings.lib_name.clone();
                     let paths = export::LibPaths::new(&self.state.settings.lib_path, &lib_name);
 
-                    // Priority: STEP > WRL > STL (STEP is better format)
+                    // Priority: STEP > WRL (STEP is better format)
                     let model_ext = if self.state.step_bytes.is_some() {
                         "step"
                     } else if self.state.wrl_bytes.is_some() {
                         "wrl"
-                    } else if self.state.stl_bytes.is_some() {
-                        "stl"
                     } else {
                         "step"  // Default fallback
                     };
@@ -1197,27 +1159,24 @@ impl eframe::App for App {
 
                         // Import footprint
                         if self.state.import_footprint {
-                            // Convert viewer coordinates (X, Y, Z) to KiCad model coordinates (X, Z, -Y)
-                            // In viewer: Y is vertical (height), Z is depth
-                            // In KiCad: Z is vertical (height), Y is depth, BUT Y-axis is inverted
+                            // No swap - both use Z-up directly
                             let kicad_offset = [
-                                self.state.model_offset[0],   // X unchanged
-                                self.state.model_offset[2],   // KiCad Y = viewer Z
-                                -self.state.model_offset[1],  // KiCad Z = -viewer Y (negated!)
+                                self.state.model_offset[0],
+                                self.state.model_offset[1],
+                                self.state.model_offset[2],
                             ];
 
-                            // Convert rotation (X is negated, Y/Z swapped with Y negated)
                             let kicad_rotation = [
-                                -self.state.model_rotation[0],  // X negated
-                                self.state.model_rotation[2],   // KiCad Y = viewer Z
-                                -self.state.model_rotation[1],  // KiCad Z = -viewer Y
+                                self.state.model_rotation[0],
+                                self.state.model_rotation[1],
+                                self.state.model_rotation[2],
                             ];
 
-                            // Convert scale (swap Y/Z but no negation since it's a multiplier)
+                            // Viewer is Z-up (same as KiCad) - use scale directly
                             let kicad_scale = [
-                                self.state.model_scale[0],  // X unchanged
-                                self.state.model_scale[2],  // KiCad Y = viewer Z
-                                self.state.model_scale[1],  // KiCad Z = viewer Y
+                                self.state.model_scale[0],
+                                self.state.model_scale[1],
+                                self.state.model_scale[2],
                             ];
 
                             export::write_footprint(&paths, &comp, &lib_name,
@@ -1228,9 +1187,6 @@ impl eframe::App for App {
                         if self.state.import_package {
                             if let Some(step) = &self.state.step_bytes {
                                 export::write_step_model(&paths, &comp, step)?;
-                            }
-                            if let Some(stl) = &self.state.stl_bytes {
-                                export::write_stl_model(&paths, &comp, stl)?;
                             }
                             if let Some(wrl) = &self.state.wrl_bytes {
                                 export::write_wrl_model(&paths, &comp, wrl)?;

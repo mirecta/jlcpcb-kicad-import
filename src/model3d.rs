@@ -40,11 +40,11 @@ void main() {
 }
 ";
 
-// ── Pad descriptor (world XZ coords in mm, Y is PCB surface = 0) ──────────────
+// ── Pad descriptor (world XY coords in mm, Z is PCB surface = 0) ──────────────
 
 pub struct PadInfo {
     pub cx: f32,  // centre X in mm
-    pub cz: f32,  // centre Z in mm (PCB Y-axis → viewer Z-axis)
+    pub cy: f32,  // centre Y in mm (Z-up, XY plane)
     pub w:  f32,
     pub h:  f32,
     pub shape: String,  // "circle", "rect", "oval"
@@ -54,7 +54,7 @@ pub struct PadInfo {
 // ── Footprint drawing (silkscreen / fab layer flat geometry) ──────────────────
 
 pub struct PcbDrawing {
-    pub tris:  Vec<[f32; 2]>,  // (x_mm, z_mm) triangle verts in viewer coords
+    pub tris:  Vec<[f32; 2]>,  // (x_mm, y_mm) triangle verts in XY plane
     pub color: [f32; 3],
 }
 
@@ -65,7 +65,7 @@ struct Mesh {
     count: i32,
     center: Vec3,
     radius: f32,
-    xz_half: f32,  // max(half-extent X, half-extent Z) — used to size the PCB board
+    xy_half: f32,  // max(half-extent X, half-extent Y) — used to size the PCB board
 }
 
 // ── GPU state ─────────────────────────────────────────────────────────────────
@@ -81,6 +81,8 @@ struct GlState {
     edge_vao:   glow::VertexArray,
     edge_vbo:   glow::Buffer,
     edge_count: i32,
+    axes_vao:   glow::VertexArray,
+    axes_vbo:   glow::Buffer,
 }
 
 impl GlState {
@@ -131,22 +133,29 @@ impl GlState {
         upload_verts(gl, comp_vao, comp_vbo, &mesh.data);
 
         // ── PCB body VAO (opaque) ────────────────────────────────────────────
-        let pcb_data = build_pcb_body(mesh.radius, mesh.xz_half, pads, drawings);
+        let pcb_data = build_pcb_body(mesh.radius, mesh.xy_half, pads, drawings);
         let pcb_vao = gl.create_vertex_array().ok()?;
         let pcb_vbo = gl.create_buffer().ok()?;
         upload_verts(gl, pcb_vao, pcb_vbo, &pcb_data);
 
         // ── PCB edge VAO (transparent) ───────────────────────────────────────
-        let edge_data = build_pcb_edges(mesh.radius, mesh.xz_half, &pads);
+        let edge_data = build_pcb_edges(mesh.radius, mesh.xy_half, &pads);
         let edge_vao = gl.create_vertex_array().ok()?;
         let edge_vbo = gl.create_buffer().ok()?;
         upload_verts(gl, edge_vao, edge_vbo, &edge_data);
+
+        // ── Coordinate axes VAO ──────────────────────────────────────────────
+        let axes_data = build_axes();
+        let axes_vao = gl.create_vertex_array().ok()?;
+        let axes_vbo = gl.create_buffer().ok()?;
+        upload_verts(gl, axes_vao, axes_vbo, &axes_data);
 
         Some(GlState {
             program,
             comp_vao, comp_vbo, comp_count: mesh.count,
             pcb_vao,  pcb_vbo,  pcb_count: (pcb_data.len() / 9) as i32,
             edge_vao, edge_vbo, edge_count: (edge_data.len() / 9) as i32,
+            axes_vao, axes_vbo,
         })
     }
 
@@ -198,23 +207,19 @@ impl GlState {
         let view_model = build_model_mat(offset, rotation, [1.0, 1.0, 1.0], center);
         // With the new matrix the component center maps to offset_world + center,
         // so the orbit target is simply that plus the camera pan.
-        let offset_world = Vec3::new(offset[0], offset[2], offset[1]);
+        let offset_world = Vec3::new(offset[0], offset[1], offset[2]);
         let orbit_target = offset_world + center + cam_pan;
 
         let dist = radius * zoom;
+        // Spherical coordinates with Z-up
         let eye = orbit_target + Vec3::new(
             dist * pitch.cos() * yaw.sin(),
-            dist * pitch.sin(),
             dist * pitch.cos() * yaw.cos(),
+            dist * pitch.sin(),
         );
         let aspect = (w as f32) / (h.max(1) as f32);
-        // When looking nearly straight up/down, Y is parallel to the view direction —
-        // use Z as world-up instead to avoid a degenerate view matrix.
-        let world_up = if pitch.abs() > std::f32::consts::FRAC_PI_2 - 0.05 {
-            Vec3::Z
-        } else {
-            Vec3::Y
-        };
+        // Z-up to match KiCad and STEP files
+        let world_up = Vec3::Z;
         let view = Mat4::look_at_rh(eye, orbit_target, world_up);
         let proj = if ortho {
             let half_h = radius * zoom;
@@ -252,6 +257,12 @@ impl GlState {
         gl.bind_vertex_array(Some(self.comp_vao));
         gl.draw_arrays(glow::TRIANGLES, 0, self.comp_count);
 
+        // Draw coordinate axes (X=red, Y=green, Z=blue)
+        gl.line_width(3.0);
+        set_model(gl, self.program, &Mat4::IDENTITY, &Mat3::IDENTITY);
+        gl.bind_vertex_array(Some(self.axes_vao));
+        gl.draw_arrays(glow::LINES, 0, 6);
+
         // Draw PCB edges (semi-transparent) — rendered last after all opaque geometry
         if self.edge_count > 0 {
             gl.enable(glow::BLEND);
@@ -284,6 +295,8 @@ impl GlState {
         gl.delete_buffer(self.pcb_vbo);
         gl.delete_vertex_array(self.edge_vao);
         gl.delete_buffer(self.edge_vbo);
+        gl.delete_vertex_array(self.axes_vao);
+        gl.delete_buffer(self.axes_vbo);
     }
 }
 
@@ -322,7 +335,7 @@ impl Default for ModelViewer {
     fn default() -> Self {
         Self {
             gl_data: Arc::new(Mutex::new(GlData::default())),
-            yaw: 0.5, pitch: 0.4, zoom: 2.5,
+            yaw: std::f32::consts::PI, pitch: 0.4, zoom: 2.5,
             cam_pan: Vec3::ZERO,
             has_model: false,
             ortho: true,
@@ -338,7 +351,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill })
+                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -353,28 +366,6 @@ impl ModelViewer {
         }
     }
 
-    pub fn load_stl(&mut self, stl: &[u8], pads: &[PadInfo], drawings: &[PcbDrawing], pre_rotation: [f32; 3]) {
-        match parse_stl(stl, pre_rotation) {
-            Some(mesh) => {
-                let mut gd = self.gl_data.lock().unwrap();
-                gd.center = mesh.center;
-                gd.radius = mesh.radius;
-                gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill })
-                    .collect());
-                gd.pending_drawings = Some(drawings.iter()
-                    .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
-                    .collect());
-                gd.pending_mesh = Some(mesh);
-                self.has_model = true;
-            }
-            None => {
-                eprintln!("[3d] STL parse: no geometry");
-                self.has_model = false;
-            }
-        }
-    }
-
     pub fn load_step(&mut self, step: &[u8], pads: &[PadInfo], drawings: &[PcbDrawing], pre_rotation: [f32; 3], center_model: bool) {
         match parse_step(step, pre_rotation, center_model) {
             Some(mesh) => {
@@ -382,7 +373,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cz: p.cz, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill })
+                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -435,20 +426,24 @@ impl ModelViewer {
                 let gd = self.gl_data.lock().unwrap();
                 let world_per_px = gd.radius * self.zoom / size.x;
                 drop(gd);
-                // Camera right and up vectors from yaw/pitch
-                let right = Vec3::new(self.yaw.cos(), 0.0, -self.yaw.sin());
-                let fwd   = Vec3::new(
-                    -self.pitch.cos() * self.yaw.sin(),
-                    -self.pitch.sin(),
-                    -self.pitch.cos() * self.yaw.cos(),
-                );
-                let up = right.cross(fwd).normalize();
 
-                // For top/bottom views, flip vertical pan direction to match screen orientation
-                let y_sign = if self.pitch.abs() > 1.4 { -1.0 } else { 1.0 };
+                // TRUE 2D pan: move in plane perpendicular to view direction
+                // Calculate view direction from camera to target
+                let dist = world_per_px * size.x / self.zoom;
+                let cam_offset = Vec3::new(
+                    dist * self.pitch.cos() * self.yaw.sin(),
+                    dist * self.pitch.cos() * self.yaw.cos(),
+                    dist * self.pitch.sin(),
+                );
+                let view_dir = -cam_offset.normalize();
+
+                // Screen right = perpendicular to view direction and world Z
+                let right = view_dir.cross(Vec3::Z).normalize();
+                // Screen up = perpendicular to view direction and right
+                let up = right.cross(view_dir).normalize();
 
                 self.cam_pan -= right * (mid_delta.x * world_per_px)
-                              - up    * (mid_delta.y * world_per_px * y_sign);
+                              - up    * (mid_delta.y * world_per_px);
                 ui.ctx().request_repaint();
             }
         }
@@ -567,42 +562,40 @@ unsafe fn set_model(
 }
 
 fn build_model_mat(offset: [f32; 3], rotation: [f32; 3], scale: [f32; 3], center: Vec3) -> Mat4 {
-    // Rotate and scale around the component's own bounding-box center, not the world origin.
-    // Matrix order: translate(offset + center) * R * S * translate(-center)
-    // Coordinate swap: KiCad Y→viewer Z, KiCad Z→viewer Y
-    let offset_world = Vec3::new(offset[0], offset[2], offset[1]);
-    let t     = Mat4::from_translation(offset_world + center);
-    let t_neg = Mat4::from_translation(-center);
+    // KiCad order: Scale → Rotate → Translate (around model origin, not center)
+    // Both KiCad and viewer are Z-up - no coordinate swap
+    let offset_world = Vec3::new(offset[0], offset[1], offset[2]);
+    let t = Mat4::from_translation(offset_world);
     let r = Mat4::from_euler(
         glam::EulerRot::ZYX,
-        rotation[1].to_radians(),  // Y from UI → Z axis in viewer
-        rotation[2].to_radians(),  // Z from UI → Y axis in viewer
-        rotation[0].to_radians(),  // X stays X
+        -rotation[2].to_radians(),
+        -rotation[1].to_radians(),
+        -rotation[0].to_radians(),
     );
     let s = Mat4::from_scale(Vec3::from(scale));
-    t * r * s * t_neg
+    t * r * s
 }
 
 // ── PCB + pad geometry ────────────────────────────────────────────────────────
 
-fn build_pcb_body(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[PcbDrawing]) -> Vec<f32> {
+fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[PcbDrawing]) -> Vec<f32> {
     const MARGIN: f32 = 3.0;
     let pad_half = if pads.is_empty() { 0.0_f32 } else {
         let mx = pads.iter().map(|p| p.cx.abs() + p.w * 0.5).fold(0.0_f32, f32::max);
-        let mz = pads.iter().map(|p| p.cz.abs() + p.h * 0.5).fold(0.0_f32, f32::max);
-        mx.max(mz)
+        let my = pads.iter().map(|p| p.cy.abs() + p.h * 0.5).fold(0.0_f32, f32::max);
+        mx.max(my)
     };
-    let half  = pad_half.max(mesh_xz_half).max(radius * 0.5) + MARGIN;
+    let half  = pad_half.max(mesh_xy_half).max(radius * 0.5) + MARGIN;
     let thick = 1.6_f32;
     let mut v: Vec<f32> = Vec::new();
 
     // Collect drill holes for surface tessellation
     let holes: Vec<(f32, f32, f32)> = pads.iter()
         .filter(|p| p.drill > 0.0)
-        .map(|p| (p.cx, p.cz, p.drill * 0.5))
+        .map(|p| (p.cx, p.cy, p.drill * 0.5))
         .collect();
 
-    // Top surface (Y=0) and bottom surface (Y=-thick) — tessellated with real holes
+    // Top surface (Z=0) and bottom surface (Z=-thick) — tessellated with real holes
     let top_green = [0.10_f32, 0.42, 0.12];
     let bot_green = [0.07_f32, 0.30, 0.09];
     quad_y_holed(&mut v, half, &holes, 0.0,    top_green);
@@ -613,21 +606,21 @@ fn build_pcb_body(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[
     // Pads and through-hole barrels
     let draw_pad = |v: &mut Vec<f32>, pad: &PadInfo, hw: f32, hh: f32, y: f32, c: [f32; 3]| {
         match pad.shape.as_str() {
-            "circle" => circle_y(v, pad.cx, pad.cz, hw.max(hh), y, c),
+            "circle" => circle_y(v, pad.cx, pad.cy, hw.max(hh), y, c),
             "oval" => {
                 if (hw - hh).abs() < 0.01 {
-                    circle_y(v, pad.cx, pad.cz, hw, y, c);
+                    circle_y(v, pad.cx, pad.cy, hw, y, c);
                 } else if hw > hh {
-                    quad_y(v, pad.cx - hw + hh, pad.cx + hw - hh, pad.cz - hh, pad.cz + hh, y, c);
-                    circle_y(v, pad.cx - hw + hh, pad.cz, hh, y, c);
-                    circle_y(v, pad.cx + hw - hh, pad.cz, hh, y, c);
+                    quad_y(v, pad.cx - hw + hh, pad.cx + hw - hh, pad.cy - hh, pad.cy + hh, y, c);
+                    circle_y(v, pad.cx - hw + hh, pad.cy, hh, y, c);
+                    circle_y(v, pad.cx + hw - hh, pad.cy, hh, y, c);
                 } else {
-                    quad_y(v, pad.cx - hw, pad.cx + hw, pad.cz - hh + hw, pad.cz + hh - hw, y, c);
-                    circle_y(v, pad.cx, pad.cz - hh + hw, hw, y, c);
-                    circle_y(v, pad.cx, pad.cz + hh - hw, hw, y, c);
+                    quad_y(v, pad.cx - hw, pad.cx + hw, pad.cy - hh + hw, pad.cy + hh - hw, y, c);
+                    circle_y(v, pad.cx, pad.cy - hh + hw, hw, y, c);
+                    circle_y(v, pad.cx, pad.cy + hh - hw, hw, y, c);
                 }
             }
-            _ => quad_y(v, pad.cx - hw, pad.cx + hw, pad.cz - hh, pad.cz + hh, y, c),
+            _ => quad_y(v, pad.cx - hw, pad.cx + hw, pad.cy - hh, pad.cy + hh, y, c),
         }
     };
 
@@ -638,24 +631,24 @@ fn build_pcb_body(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[
             let dr  = pad.drill * 0.5;
             let r_o = hw.max(hh); // outer pad radius
             // Copper barrel — open cylinder, no caps so hole is see-through
-            cylinder_hole(&mut v, pad.cx, pad.cz, dr, 0.0, -thick, pc);
+            cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.0, -thick, pc);
             // Annular ring pads: inner=drill radius, outer=pad radius
             // This keeps the hole center genuinely open for see-through
-            ring_y(&mut v, pad.cx, pad.cz, dr, r_o,  0.05,         pc);
-            ring_y(&mut v, pad.cx, pad.cz, dr, r_o, -thick - 0.05, pc);
+            ring_y(&mut v, pad.cx, pad.cy, dr, r_o,  0.05,         pc);
+            ring_y(&mut v, pad.cx, pad.cy, dr, r_o, -thick - 0.05, pc);
         } else {
             draw_pad(&mut v, pad, hw, hh, 0.05, pc);
         }
     }
 
-    // Silkscreen / fab drawings at Y=0.08
-    let draw_y = 0.08_f32;
-    let draw_n = [0.0_f32, 1.0, 0.0];
+    // Silkscreen / fab drawings at Z=0.08
+    let draw_z = 0.08_f32;
+    let draw_n = [0.0_f32, 0.0, 1.0];  // Z-up normal
     for draw in drawings {
         for tri in draw.tris.chunks(3) {
             if tri.len() < 3 { continue; }
             for vert in tri {
-                v.extend_from_slice(&[vert[0], draw_y, vert[1]]);
+                v.extend_from_slice(&[vert[0], vert[1], draw_z]);
                 v.extend_from_slice(&draw_n);
                 v.extend_from_slice(&draw.color);
             }
@@ -665,36 +658,39 @@ fn build_pcb_body(radius: f32, mesh_xz_half: f32, pads: &[PadInfo], drawings: &[
     v
 }
 
-fn build_pcb_edges(radius: f32, mesh_xz_half: f32, pads: &[PadInfo]) -> Vec<f32> {
+fn build_pcb_edges(radius: f32, mesh_xy_half: f32, pads: &[PadInfo]) -> Vec<f32> {
     const MARGIN: f32 = 3.0;
     let pad_half = if pads.is_empty() { 0.0_f32 } else {
         let mx = pads.iter().map(|p| p.cx.abs() + p.w * 0.5).fold(0.0_f32, f32::max);
-        let mz = pads.iter().map(|p| p.cz.abs() + p.h * 0.5).fold(0.0_f32, f32::max);
-        mx.max(mz)
+        let my = pads.iter().map(|p| p.cy.abs() + p.h * 0.5).fold(0.0_f32, f32::max);
+        mx.max(my)
     };
-    let half  = pad_half.max(mesh_xz_half).max(radius * 0.5) + MARGIN;
+    let half  = pad_half.max(mesh_xy_half).max(radius * 0.5) + MARGIN;
     let thick = 1.6_f32;
     let mut v: Vec<f32> = Vec::new();
     let ec = [0.08_f32, 0.32, 0.10]; // edge green
-    rect_xz_face(&mut v, -half, -thick, -half,  half, 0.0, -half, [0.0, 0.0, -1.0], ec);
-    rect_xz_face(&mut v,  half, -thick,  half, -half, 0.0,  half, [0.0, 0.0,  1.0], ec);
-    rect_xz_face(&mut v,  half, -thick, -half,  half, 0.0,  half, [1.0, 0.0,  0.0], ec);
-    rect_xz_face(&mut v, -half, -thick,  half, -half, 0.0, -half, [-1.0, 0.0, 0.0], ec);
+    // Four vertical edges of PCB (Z-up: XY plane, vertical in Z)
+    rect_xy_edge(&mut v, -half, -half, -thick,  half, -half, 0.0, [ 0.0, -1.0, 0.0], ec); // -Y edge
+    rect_xy_edge(&mut v, -half,  half, -thick,  half,  half, 0.0, [ 0.0,  1.0, 0.0], ec); // +Y edge
+    rect_xy_edge(&mut v, -half, -half, -thick, -half,  half, 0.0, [-1.0,  0.0, 0.0], ec); // -X edge
+    rect_xy_edge(&mut v,  half, -half, -thick,  half,  half, 0.0, [ 1.0,  0.0, 0.0], ec); // +X edge
+
     v
 }
 
 // Flat circle in XZ plane at given Y, centered at (cx, cz) with radius r
-fn circle_y(v: &mut Vec<f32>, cx: f32, cz: f32, r: f32, y: f32, c: [f32; 3]) {
-    let n = [0.0_f32, 1.0, 0.0];
-    let segments = 24; // Number of triangles
-    let center = [cx, y, cz];
+// Flat circle in XY plane at given Z, centered at (cx, cy) with radius r
+fn circle_y(v: &mut Vec<f32>, cx: f32, cy: f32, r: f32, z: f32, c: [f32; 3]) {
+    let n = [0.0_f32, 0.0, 1.0];  // Z-up normal
+    let segments = 24;
+    let center = [cx, cy, z];
 
     for i in 0..segments {
         let a0 = (i as f32) * 2.0 * std::f32::consts::PI / (segments as f32);
         let a1 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / (segments as f32);
 
-        let p0 = [cx + r * a0.cos(), y, cz + r * a0.sin()];
-        let p1 = [cx + r * a1.cos(), y, cz + r * a1.sin()];
+        let p0 = [cx + r * a0.cos(), cy + r * a0.sin(), z];
+        let p1 = [cx + r * a1.cos(), cy + r * a1.sin(), z];
 
         // Triangle: center -> p0 -> p1
         v.extend_from_slice(&center);
@@ -711,18 +707,18 @@ fn circle_y(v: &mut Vec<f32>, cx: f32, cz: f32, r: f32, y: f32, c: [f32; 3]) {
     }
 }
 
-// Annular ring (washer) in XZ plane — inner radius r_i, outer radius r_o
-fn ring_y(v: &mut Vec<f32>, cx: f32, cz: f32, r_i: f32, r_o: f32, y: f32, c: [f32; 3]) {
-    let n: [f32; 3] = [0.0, if y >= 0.0 { 1.0 } else { -1.0 }, 0.0];
+// Annular ring (washer) in XY plane — inner radius r_i, outer radius r_o
+fn ring_y(v: &mut Vec<f32>, cx: f32, cy: f32, r_i: f32, r_o: f32, z: f32, c: [f32; 3]) {
+    let n: [f32; 3] = [0.0, 0.0, if z >= 0.0 { 1.0 } else { -1.0 }];  // Z-up/down normal
     let segments = 32;
     for i in 0..segments {
         let a0 = (i as f32) * 2.0 * std::f32::consts::PI / segments as f32;
         let a1 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / segments as f32;
-        let pi0 = [cx + r_i * a0.cos(), y, cz + r_i * a0.sin()];
-        let pi1 = [cx + r_i * a1.cos(), y, cz + r_i * a1.sin()];
-        let po0 = [cx + r_o * a0.cos(), y, cz + r_o * a0.sin()];
-        let po1 = [cx + r_o * a1.cos(), y, cz + r_o * a1.sin()];
-        if y >= 0.0 {
+        let pi0 = [cx + r_i * a0.cos(), cy + r_i * a0.sin(), z];
+        let pi1 = [cx + r_i * a1.cos(), cy + r_i * a1.sin(), z];
+        let po0 = [cx + r_o * a0.cos(), cy + r_o * a0.sin(), z];
+        let po1 = [cx + r_o * a1.cos(), cy + r_o * a1.sin(), z];
+        if z >= 0.0 {
             for pt in [pi0, po0, po1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
             for pt in [pi0, po1, pi1] { v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c); }
         } else {
@@ -733,15 +729,15 @@ fn ring_y(v: &mut Vec<f32>, cx: f32, cz: f32, r_i: f32, r_o: f32, y: f32, c: [f3
 }
 
 // Same as circle_y but normal faces DOWN (for bottom-facing surfaces)
-fn circle_y_down(v: &mut Vec<f32>, cx: f32, cz: f32, r: f32, y: f32, c: [f32; 3]) {
-    let n = [0.0_f32, -1.0, 0.0];
+fn circle_y_down(v: &mut Vec<f32>, cx: f32, cy: f32, r: f32, z: f32, c: [f32; 3]) {
+    let n = [0.0_f32, 0.0, -1.0];  // Z-down normal
     let segments = 24;
     for i in 0..segments {
         let a0 = (i as f32) * 2.0 * std::f32::consts::PI / segments as f32;
         let a1 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / segments as f32;
-        let center = [cx, y, cz];
-        let p0 = [cx + r * a0.cos(), y, cz + r * a0.sin()];
-        let p1 = [cx + r * a1.cos(), y, cz + r * a1.sin()];
+        let center = [cx, cy, z];
+        let p0 = [cx + r * a0.cos(), cy + r * a0.sin(), z];
+        let p1 = [cx + r * a1.cos(), cy + r * a1.sin(), z];
         // Reversed winding for downward normal
         for pt in [center, p1, p0] {
             v.extend_from_slice(&pt); v.extend_from_slice(&n); v.extend_from_slice(&c);
@@ -749,46 +745,46 @@ fn circle_y_down(v: &mut Vec<f32>, cx: f32, cz: f32, r: f32, y: f32, c: [f32; 3]
     }
 }
 
-// Copper-plated through-hole barrel: cylinder from y_top to y_bot, inward normals
-fn cylinder_hole(v: &mut Vec<f32>, cx: f32, cz: f32, r: f32, y_top: f32, y_bot: f32, c: [f32; 3]) {
+// Copper-plated through-hole barrel: cylinder from z_top to z_bot, inward normals
+fn cylinder_hole(v: &mut Vec<f32>, cx: f32, cy: f32, r: f32, z_top: f32, z_bot: f32, c: [f32; 3]) {
     let segments = 24;
     for i in 0..segments {
         let a0 = (i as f32) * 2.0 * std::f32::consts::PI / segments as f32;
         let a1 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / segments as f32;
         let (c0, s0) = (a0.cos(), a0.sin());
         let (c1, s1) = (a1.cos(), a1.sin());
-        let n0 = [-c0, 0.0_f32, -s0]; // inward normal
-        let n1 = [-c1, 0.0_f32, -s1];
-        let t0 = [cx + r*c0, y_top, cz + r*s0];
-        let t1 = [cx + r*c1, y_top, cz + r*s1];
-        let b0 = [cx + r*c0, y_bot,  cz + r*s0];
-        let b1 = [cx + r*c1, y_bot,  cz + r*s1];
+        let n0 = [-c0, -s0, 0.0_f32]; // inward normal (XY plane)
+        let n1 = [-c1, -s1, 0.0_f32];
+        let t0 = [cx + r*c0, cy + r*s0, z_top];
+        let t1 = [cx + r*c1, cy + r*s1, z_top];
+        let b0 = [cx + r*c0, cy + r*s0, z_bot];
+        let b1 = [cx + r*c1, cy + r*s1, z_bot];
         // Two triangles per segment
         for (p, n) in [(t0,n0),(b0,n0),(b1,n1)] { v.extend_from_slice(&p); v.extend_from_slice(&n); v.extend_from_slice(&c); }
         for (p, n) in [(t0,n0),(b1,n1),(t1,n1)] { v.extend_from_slice(&p); v.extend_from_slice(&n); v.extend_from_slice(&c); }
     }
 }
 
-// PCB surface quad in XZ plane with circular drill holes cut out (grid tessellation)
-fn quad_y_holed(v: &mut Vec<f32>, half: f32, holes: &[(f32, f32, f32)], y: f32, c: [f32; 3]) {
+// PCB surface quad in XY plane with circular drill holes cut out (grid tessellation)
+fn quad_y_holed(v: &mut Vec<f32>, half: f32, holes: &[(f32, f32, f32)], z: f32, c: [f32; 3]) {
     const N: i32 = 96;
     let step = (2.0 * half) / N as f32;
-    let nrm: [f32; 3] = [0.0, if y >= 0.0 { 1.0 } else { -1.0 }, 0.0];
+    let nrm: [f32; 3] = [0.0, 0.0, if z >= 0.0 { 1.0 } else { -1.0 }];  // Z-up/down normal
     for i in 0..N {
         for j in 0..N {
             let x0 = -half + i as f32 * step;
             let x1 = x0 + step;
-            let z0 = -half + j as f32 * step;
-            let z1 = z0 + step;
+            let y0 = -half + j as f32 * step;
+            let y1 = y0 + step;
             let cx = (x0 + x1) * 0.5;
-            let cz = (z0 + z1) * 0.5;
-            let in_hole = holes.iter().any(|(hx, hz, hr)| {
-                let dx = cx - hx; let dz = cz - hz;
-                dx * dx + dz * dz < hr * hr
+            let cy = (y0 + y1) * 0.5;
+            let in_hole = holes.iter().any(|(hx, hy, hr)| {
+                let dx = cx - hx; let dy = cy - hy;
+                dx * dx + dy * dy < hr * hr
             });
             if in_hole { continue; }
-            let pts = [[x0,y,z0],[x1,y,z0],[x1,y,z1],[x0,y,z1]];
-            let order: [(usize,usize,usize); 2] = if y >= 0.0 { [(0,1,2),(0,2,3)] } else { [(0,2,1),(0,3,2)] };
+            let pts = [[x0,y0,z],[x1,y0,z],[x1,y1,z],[x0,y1,z]];
+            let order: [(usize,usize,usize); 2] = if z >= 0.0 { [(0,1,2),(0,2,3)] } else { [(0,2,1),(0,3,2)] };
             for (a,b,ci) in order {
                 for &k in &[a, b, ci] {
                     v.extend_from_slice(&pts[k]);
@@ -800,11 +796,11 @@ fn quad_y_holed(v: &mut Vec<f32>, half: f32, holes: &[(f32, f32, f32)], y: f32, 
     }
 }
 
-// Flat quad in XZ plane at given Y, x0..x1, z0..z1 (CCW from above = Y-up)
-fn quad_y(v: &mut Vec<f32>, x0: f32, x1: f32, z0: f32, z1: f32, y: f32, c: [f32; 3]) {
-    let n = if y >= 0.0 { [0.0_f32, 1.0, 0.0] } else { [0.0_f32, -1.0, 0.0] };
-    let pts = [[x0,y,z0],[x1,y,z0],[x1,y,z1],[x0,y,z1]];
-    let order = if y >= 0.0 { [(0,1,2),(0,2,3)] } else { [(0,2,1),(0,3,2)] };
+// Flat quad in XY plane at given Z, x0..x1, y0..y1 (CCW from above = Z-up)
+fn quad_y(v: &mut Vec<f32>, x0: f32, x1: f32, y0: f32, y1: f32, z: f32, c: [f32; 3]) {
+    let n = if z >= 0.0 { [0.0_f32, 0.0, 1.0] } else { [0.0_f32, 0.0, -1.0] };  // Z-up/down normal
+    let pts = [[x0,y0,z],[x1,y0,z],[x1,y1,z],[x0,y1,z]];
+    let order = if z >= 0.0 { [(0,1,2),(0,2,3)] } else { [(0,2,1),(0,3,2)] };
     for (a,b,c_i) in order {
         for &i in &[a, b, c_i] {
             v.extend_from_slice(&pts[i]);
@@ -814,24 +810,21 @@ fn quad_y(v: &mut Vec<f32>, x0: f32, x1: f32, z0: f32, z1: f32, y: f32, c: [f32;
     }
 }
 
-// Side face of PCB board — two triangles forming a vertical rect
-fn rect_xz_face(
+// Side edge of PCB board — two triangles forming a vertical rect (Z-up)
+fn rect_xy_edge(
     v: &mut Vec<f32>,
     x0: f32, y0: f32, z0: f32,
-    x1: f32, y1: f32, z1: f32,  // ignored — we use x0/z0 and x1/z1 for two corners
+    x1: f32, y1: f32, z1: f32,
     n: [f32; 3],
     c: [f32; 3],
 ) {
-    // We receive the "far" corner as (x1,y1,z1) but need 4 corners of the face.
-    // Call site passes: near-bottom corner and far-bottom corner; we extend Y.
-    // Actually let's do it differently: the 4 corners are determined by the normal.
-    // For simplicity, let's treat (x0, y0, z0)..(x1, y1, z1) as two diagonal points
-    // of the face. This only works for axis-aligned faces.
+    // Two diagonal corners of a vertical rectangular face
+    // For Z-up: the face is vertical (extends in Z), horizontal extent in X or Y
     let pts = [
-        [x0, y0, z0],
-        [x1, y0, z1],
-        [x1, y1, z1],
-        [x0, y1, z0],
+        [x0, y0, z0],  // bottom corner 1
+        [x1, y1, z0],  // bottom corner 2
+        [x1, y1, z1],  // top corner 2
+        [x0, y0, z1],  // top corner 1
     ];
     for (a,b,ci) in [(0,1,2),(0,2,3)] {
         for &i in &[a, b, ci] {
@@ -918,94 +911,9 @@ fn parse_wrl(data: &[u8], pre_rotation: [f32; 3]) -> Option<Mesh> {
         }
     }
 
-    // Shift Y so the model bottom sits 0.1mm above the PCB surface (prevents z-fighting at Y=0).
-    let min_y = verts.chunks(9).map(|c| c[1]).fold(f32::MAX, f32::min);
-    for chunk in verts.chunks_mut(9) { chunk[1] += 0.1 - min_y; }
 
-    // Center the model at XZ=(0,0) so it appears over the pad centroid.
-    // The VRML from EasyEDA uses its own origin which may differ from the footprint centroid.
-    let (pre_center, _, _) = compute_bounds(&verts);
-    for chunk in verts.chunks_mut(9) {
-        chunk[0] -= pre_center.x;
-        chunk[2] -= pre_center.z;
-    }
-
-    let (center, radius, xz_half) = compute_bounds(&verts);
-    Some(Mesh { count: (verts.len() / 9) as i32, data: verts, center, radius, xz_half })
-}
-
-// ── STL parser ────────────────────────────────────────────────────────────────
-
-fn parse_stl(data: &[u8], pre_rotation: [f32; 3]) -> Option<Mesh> {
-    use std::io::Cursor;
-
-    // Try binary STL first, fall back to ASCII
-    let mut cursor = Cursor::new(data);
-    let stl = stl_io::read_stl(&mut cursor).ok()?;
-
-    let mut verts: Vec<f32> = Vec::new();
-    let color = [0.2, 0.2, 0.2]; // Dark gray default color
-
-    for tri in stl.faces {
-        // STL uses indexed vertices
-        let idx = tri.vertices;
-        if idx[0] >= stl.vertices.len() || idx[1] >= stl.vertices.len() || idx[2] >= stl.vertices.len() {
-            continue; // Invalid indices
-        }
-
-        let a: [f32; 3] = stl.vertices[idx[0]].into();
-        let b: [f32; 3] = stl.vertices[idx[1]].into();
-        let c: [f32; 3] = stl.vertices[idx[2]].into();
-
-        // Use provided normal from STL, or compute if zero
-        let n: [f32; 3] = if tri.normal[0].abs() < 1e-6 && tri.normal[1].abs() < 1e-6 && tri.normal[2].abs() < 1e-6 {
-            flat_normal(a, b, c)
-        } else {
-            tri.normal.into()
-        };
-
-        // Add triangle: 3 vertices × (pos + normal + color)
-        for &p in &[a, b, c] {
-            verts.extend_from_slice(&p);
-            verts.extend_from_slice(&n);
-            verts.extend_from_slice(&color);
-        }
-    }
-
-    if verts.is_empty() { return None; }
-
-    // Apply pre_rotation if needed (same as WRL)
-    let any_rot = pre_rotation.iter().any(|&v| v.abs() > 1e-4);
-    if any_rot {
-        let mat = Mat3::from_euler(
-            glam::EulerRot::XYZ,
-            -pre_rotation[0].to_radians(),
-            -pre_rotation[1].to_radians(),
-            -pre_rotation[2].to_radians(),
-        );
-        for chunk in verts.chunks_mut(9) {
-            let p = Vec3::new(chunk[0], chunk[1], chunk[2]);
-            let n = Vec3::new(chunk[3], chunk[4], chunk[5]);
-            let rp = mat * p;
-            let rn = mat * n;
-            chunk[0] = rp.x; chunk[1] = rp.y; chunk[2] = rp.z;
-            chunk[3] = rn.x; chunk[4] = rn.y; chunk[5] = rn.z;
-        }
-    }
-
-    // Shift Y so model bottom sits 0.1mm above PCB surface
-    let min_y = verts.chunks(9).map(|c| c[1]).fold(f32::MAX, f32::min);
-    for chunk in verts.chunks_mut(9) { chunk[1] += 0.1 - min_y; }
-
-    // Center at XZ=(0,0)
-    let (pre_center, _, _) = compute_bounds(&verts);
-    for chunk in verts.chunks_mut(9) {
-        chunk[0] -= pre_center.x;
-        chunk[2] -= pre_center.z;
-    }
-
-    let (center, radius, xz_half) = compute_bounds(&verts);
-    Some(Mesh { count: (verts.len() / 9) as i32, data: verts, center, radius, xz_half })
+    let (center, radius, xy_half) = compute_bounds(&verts);
+    Some(Mesh { count: (verts.len() / 9) as i32, data: verts, center, radius, xy_half })
 }
 
 // ── STEP color extraction ─────────────────────────────────────────────────────
@@ -1246,20 +1154,17 @@ fn parse_step(data: &[u8], pre_rotation: [f32; 3], center_model: bool) -> Option
         }
     }
 
-    let min_y = verts.chunks(9).map(|c| c[1]).fold(f32::MAX, f32::min);
-    for chunk in verts.chunks_mut(9) { chunk[1] += 0.1 - min_y; }
-
-    // Only center if requested (custom files need centering, JLCPCB files have correct origin)
+    // Optional centering for custom files only (JLCPCB files have correct origin)
     if center_model {
         let (pre_center, _, _) = compute_bounds(&verts);
         for chunk in verts.chunks_mut(9) {
             chunk[0] -= pre_center.x;
-            chunk[2] -= pre_center.z;
+            chunk[1] -= pre_center.y;
         }
     }
 
-    let (center, radius, xz_half) = compute_bounds(&verts);
-    Some(Mesh { count: (verts.len() / 9) as i32, data: verts, center, radius, xz_half })
+    let (center, radius, xy_half) = compute_bounds(&verts);
+    Some(Mesh { count: (verts.len() / 9) as i32, data: verts, center, radius, xy_half })
 }
 
 fn flat_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
@@ -1280,8 +1185,9 @@ fn compute_bounds(verts: &[f32]) -> (Vec3, f32, f32) {
     }
     let center = (mn + mx) * 0.5;
     let radius = ((mx - mn).length() * 0.5).max(0.001);
-    let xz_half = ((mx.x - mn.x).max(mx.z - mn.z) * 0.5).max(0.001);
-    (center, radius, xz_half)
+    // Z-up: horizontal extents are X and Y
+    let xy_half = ((mx.x - mn.x).max(mx.y - mn.y) * 0.5).max(0.001);
+    (center, radius, xy_half)
 }
 
 fn collect_float_arrays(text: &str, tag: &str) -> Vec<Vec<f32>> {
@@ -1338,4 +1244,24 @@ fn collect_diffuse_colors(text: &str) -> Vec<[f32; 3]> {
         if nums.len() == 3 { out.push([nums[0], nums[1], nums[2]]); }
     }
     out
+}
+
+fn build_axes() -> Vec<f32> {
+    let mut v = Vec::new();
+    let len = 50.0;
+    let n = [0.0, 0.0, 1.0]; // dummy normal
+
+    // X axis (red): origin to +X
+    v.extend_from_slice(&[0.0, 0.0, 0.0]); v.extend_from_slice(&n); v.extend_from_slice(&[1.0, 0.0, 0.0]);
+    v.extend_from_slice(&[len, 0.0, 0.0]); v.extend_from_slice(&n); v.extend_from_slice(&[1.0, 0.0, 0.0]);
+
+    // Y axis (green): origin to +Y
+    v.extend_from_slice(&[0.0, 0.0, 0.0]); v.extend_from_slice(&n); v.extend_from_slice(&[0.0, 1.0, 0.0]);
+    v.extend_from_slice(&[0.0, len, 0.0]); v.extend_from_slice(&n); v.extend_from_slice(&[0.0, 1.0, 0.0]);
+
+    // Z axis (blue): origin to +Z
+    v.extend_from_slice(&[0.0, 0.0, 0.0]); v.extend_from_slice(&n); v.extend_from_slice(&[0.0, 0.0, 1.0]);
+    v.extend_from_slice(&[0.0, 0.0, len]); v.extend_from_slice(&n); v.extend_from_slice(&[0.0, 0.0, 1.0]);
+
+    v
 }
