@@ -767,8 +767,8 @@ impl eframe::App for App {
             };
 
             egui::ScrollArea::both().show(ui, |ui| {
-                // Prevent the two-column layout from squeezing below usable size
-                ui.set_min_width(900.0);
+                // Use horizontal scrollbar for narrow windows instead of overflowing
+                ui.set_min_width(600.0);
                 // Header
                 ui.heading(&comp.value);
                 ui.label(format!("{} | {} | {}", comp.lcsc_id, comp.package, comp.manufacturer));
