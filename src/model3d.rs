@@ -1051,7 +1051,66 @@ fn step_face_colors(text: &str) -> std::collections::HashMap<u64, [f32; 3]> {
 
 // ── STEP parser (via truck) ───────────────────────────────────────────────────
 
+// Helper to create Mesh from raw vertex data (shared by OCC and truck parsers)
+fn parse_step_from_verts(mut verts: Vec<f32>, pre_rotation: [f32; 3], center_model: bool) -> Option<Mesh> {
+    if verts.is_empty() { return None; }
+
+    let any_rot = pre_rotation.iter().any(|&v| v.abs() > 1e-4);
+    if any_rot {
+        let mat = Mat3::from_euler(
+            glam::EulerRot::XYZ,
+            -pre_rotation[0].to_radians(),
+            -pre_rotation[1].to_radians(),
+            -pre_rotation[2].to_radians(),
+        );
+        for chunk in verts.chunks_mut(9) {
+            let p = Vec3::new(chunk[0], chunk[1], chunk[2]);
+            let n = Vec3::new(chunk[3], chunk[4], chunk[5]);
+            let rp = mat * p;
+            let rn = mat * n;
+            chunk[0] = rp.x; chunk[1] = rp.y; chunk[2] = rp.z;
+            chunk[3] = rn.x; chunk[4] = rn.y; chunk[5] = rn.z;
+        }
+    }
+
+    // Optional centering for custom files only (JLCPCB files have correct origin)
+    if center_model {
+        let (pre_center, _, _) = compute_bounds(&verts);
+        for chunk in verts.chunks_mut(9) {
+            chunk[0] -= pre_center.x;
+            chunk[1] -= pre_center.y;
+            chunk[2] -= pre_center.z;
+        }
+    }
+
+    let (center, radius, xy_half) = compute_bounds(&verts);
+    Some(Mesh {
+        count: (verts.len() / 9) as i32,
+        data: verts,
+        center,
+        radius,
+        xy_half,
+    })
+}
+
 fn parse_step(data: &[u8], pre_rotation: [f32; 3], center_model: bool) -> Option<Mesh> {
+    // Try OpenCASCADE first for perfect per-face colors (if available)
+    #[cfg(feature = "opencascade")]
+    {
+        match crate::step_occ_ffi::parse_step_occ(data) {
+            Ok(verts) => {
+                eprintln!("[STEP] ✓ OpenCASCADE: {} vertices with per-face colors", verts.len() / 9);
+                return parse_step_from_verts(verts, pre_rotation, center_model);
+            }
+            Err(e) => {
+                eprintln!("[STEP] ⚠ OpenCASCADE failed ({}), falling back to truck", e);
+            }
+        }
+    }
+
+    // Fallback to truck parser (dominant color per shell)
+    eprintln!("[STEP] Using truck parser (dominant color per shell)");
+
     use truck_stepio::r#in::{ruststep, Table};
     use truck_meshalgo::prelude::*;
 
@@ -1127,37 +1186,8 @@ fn parse_step(data: &[u8], pre_rotation: [f32; 3], center_model: bool) -> Option
         }
     }
 
-    if verts.is_empty() { return None; }
-
-    let any_rot = pre_rotation.iter().any(|&v| v.abs() > 1e-4);
-    if any_rot {
-        let mat = Mat3::from_euler(
-            glam::EulerRot::XYZ,
-            -pre_rotation[0].to_radians(),
-            -pre_rotation[1].to_radians(),
-            -pre_rotation[2].to_radians(),
-        );
-        for chunk in verts.chunks_mut(9) {
-            let p = Vec3::new(chunk[0], chunk[1], chunk[2]);
-            let n = Vec3::new(chunk[3], chunk[4], chunk[5]);
-            let rp = mat * p;
-            let rn = mat * n;
-            chunk[0] = rp.x; chunk[1] = rp.y; chunk[2] = rp.z;
-            chunk[3] = rn.x; chunk[4] = rn.y; chunk[5] = rn.z;
-        }
-    }
-
-    // Optional centering for custom files only (JLCPCB files have correct origin)
-    if center_model {
-        let (pre_center, _, _) = compute_bounds(&verts);
-        for chunk in verts.chunks_mut(9) {
-            chunk[0] -= pre_center.x;
-            chunk[1] -= pre_center.y;
-        }
-    }
-
-    let (center, radius, xy_half) = compute_bounds(&verts);
-    Some(Mesh { count: (verts.len() / 9) as i32, data: verts, center, radius, xy_half })
+    // Use same helper as OCC parser for rotation/centering
+    parse_step_from_verts(verts, pre_rotation, center_model)
 }
 
 fn flat_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
