@@ -405,12 +405,12 @@ impl eframe::App for App {
                     let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
                         .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
                         .collect();
-                    // Prefer STEP over WRL - more standard, better colors, consistent orientation
-                    if let Some(ref bytes) = step {
-                        self.state.model_viewer.load_step(bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
-                    } else if let Some(ref bytes) = wrl {
-                        // VRML from EasyEDA is Y-up; rotate +90° around X to match viewer
+                    // Prefer WRL over STEP - WRL has working per-face colors (STEP limited by truck library)
+                    if let Some(ref bytes) = wrl {
+                        // VRML from JLCPCB is Y-up; rotate +90° around X to match viewer (Z-up)
                         self.state.model_viewer.load(bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
+                    } else if let Some(ref bytes) = step {
+                        self.state.model_viewer.load_step(bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
                     } else {
                         self.state.model_viewer.has_model = false;
                     }
@@ -1170,13 +1170,15 @@ impl eframe::App for App {
                     let lib_name = self.state.settings.lib_name.clone();
                     let paths = export::LibPaths::new(&self.state.settings.lib_path, &lib_name);
 
-                    // Priority: STEP > STL > WRL
-                    let model_ext = if self.state.step_bytes.is_some() {
+                    // Priority: WRL > STEP > STL (WRL has working colors)
+                    let model_ext = if self.state.wrl_bytes.is_some() {
+                        "wrl"
+                    } else if self.state.step_bytes.is_some() {
                         "step"
                     } else if self.state.stl_bytes.is_some() {
                         "stl"
                     } else {
-                        "wrl"
+                        "wrl"  // Default fallback
                     };
 
                     let result: anyhow::Result<()> = (|| {

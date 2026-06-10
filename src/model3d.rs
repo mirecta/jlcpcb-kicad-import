@@ -1010,6 +1010,30 @@ fn parse_stl(data: &[u8], pre_rotation: [f32; 3]) -> Option<Mesh> {
 
 // ── STEP color extraction ─────────────────────────────────────────────────────
 
+/// Build a map: shell_id → ordered list of face colors
+fn build_shell_face_map(text: &str, face_colors: &std::collections::HashMap<u64, [f32; 3]>) -> std::collections::HashMap<u64, Vec<[f32; 3]>> {
+    use std::collections::HashMap;
+    let mut result: HashMap<u64, Vec<[f32; 3]>> = HashMap::new();
+    const DEFAULT: [f32; 3] = [0.75, 0.75, 0.75];
+
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(line) = line.strip_prefix('#') else { continue };
+        let Some(eq) = line.find('=') else { continue };
+        let Ok(id) = line[..eq].trim().parse::<u64>() else { continue };
+        let content = line[eq + 1..].trim().trim_end_matches(';').trim();
+
+        if content.starts_with("CLOSED_SHELL") || content.starts_with("OPEN_SHELL") {
+            let face_ids = step_refs(content);
+            let colors: Vec<[f32; 3]> = face_ids.iter()
+                .map(|&fid| face_colors.get(&fid).copied().unwrap_or(DEFAULT))
+                .collect();
+            result.insert(id, colors);
+        }
+    }
+    result
+}
+
 fn step_refs(s: &str) -> Vec<u64> {
     let mut out = Vec::new();
     let mut rest = s;
@@ -1042,18 +1066,17 @@ fn step_floats(s: &str) -> Vec<f64> {
     out
 }
 
-/// Parse the STEP text and return a map: shell_entity_id → [r, g, b]
+/// Parse the STEP text and return a map: face_entity_id → [r, g, b]
 /// Follows the full AP214 color chain:
 /// STYLED_ITEM → PRESENTATION_STYLE_ASSIGNMENT → SURFACE_STYLE_USAGE →
 /// SURFACE_SIDE_STYLE → SURFACE_STYLE_FILL_AREA → FILL_AREA_STYLE →
 /// FILL_AREA_STYLE_COLOUR → COLOUR_RGB
-fn step_shell_colors(text: &str) -> std::collections::HashMap<u64, [f32; 3]> {
+fn step_face_colors(text: &str) -> std::collections::HashMap<u64, [f32; 3]> {
     use std::collections::HashMap;
 
     let mut entity_name: HashMap<u64, String> = HashMap::new();
     let mut entity_refs: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut id_to_color: HashMap<u64, [f32; 3]> = HashMap::new();
-    let mut shell_faces: HashMap<u64, Vec<u64>> = HashMap::new();
 
     for line in text.lines() {
         let line = line.trim();
@@ -1069,10 +1092,9 @@ fn step_shell_colors(text: &str) -> std::collections::HashMap<u64, [f32; 3]> {
         if name == "COLOUR_RGB" {
             let nums = step_floats(content);
             if nums.len() >= 3 {
-                id_to_color.insert(id, [nums[0] as f32, nums[1] as f32, nums[2] as f32]);
+                let color = [nums[0] as f32, nums[1] as f32, nums[2] as f32];
+                id_to_color.insert(id, color);
             }
-        } else if name == "CLOSED_SHELL" || name == "OPEN_SHELL" {
-            shell_faces.insert(id, refs.clone());
         }
 
         entity_name.insert(id, name);
@@ -1123,27 +1145,7 @@ fn step_shell_colors(text: &str) -> std::collections::HashMap<u64, [f32; 3]> {
         }
     }
 
-    // Build shell_id → dominant face color
-    let mut shell_colors: HashMap<u64, [f32; 3]> = HashMap::new();
-    for (&shell_id, face_ids) in &shell_faces {
-        // Pick the most frequent color among this shell's faces
-        let mut color_count: HashMap<[u32; 3], (usize, [f32; 3])> = HashMap::new();
-        for &fid in face_ids {
-            if let Some(&c) = face_colors.get(&fid) {
-                let key = [
-                    (c[0] * 1000.0) as u32,
-                    (c[1] * 1000.0) as u32,
-                    (c[2] * 1000.0) as u32,
-                ];
-                color_count.entry(key).and_modify(|(cnt, _)| *cnt += 1).or_insert((1, c));
-            }
-        }
-        if let Some((_, c)) = color_count.values().max_by_key(|(cnt, _)| *cnt) {
-            shell_colors.insert(shell_id, *c);
-        }
-    }
-
-    shell_colors
+    face_colors
 }
 
 // ── STEP parser (via truck) ───────────────────────────────────────────────────
@@ -1153,7 +1155,7 @@ fn parse_step(data: &[u8], pre_rotation: [f32; 3]) -> Option<Mesh> {
     use truck_meshalgo::prelude::*;
 
     let s = String::from_utf8_lossy(data);
-    let shell_colors = step_shell_colors(s.as_ref());
+    let face_colors = step_face_colors(s.as_ref());
     let exchange = ruststep::parser::parse(s.as_ref()).ok()?;
     let data_section = exchange.data.first()?;
     let table = Table::from_data_section(data_section);
@@ -1161,13 +1163,31 @@ fn parse_step(data: &[u8], pre_rotation: [f32; 3]) -> Option<Mesh> {
     let mut verts: Vec<f32> = Vec::new();
     const DEFAULT_COLOR: [f32; 3] = [0.75, 0.75, 0.75];
 
+    // Build shell→colors map from raw STEP - each shell gets list of its face colors
+    let shell_face_colors = build_shell_face_map(s.as_ref(), &face_colors);
+
+    // Render shells - for now use whole shell with dominant color
+    // TODO: Per-face colors need custom STEP geometry parser, truck API doesn't support it
     for (shell_id, shell_holder) in table.shell.iter() {
-        let color = shell_colors.get(shell_id).copied().unwrap_or(DEFAULT_COLOR);
         let shell = match table.to_compressed_shell(shell_holder) {
             Ok(s) => s,
             Err(_) => continue,
         };
-        // Two-pass adaptive triangulation: first pass computes bounding box for tolerance
+
+        // Get face colors for this shell - pick most common
+        let colors_in_shell = shell_face_colors.get(shell_id).cloned().unwrap_or_default();
+        let color = if !colors_in_shell.is_empty() {
+            // Count color frequency
+            let mut counts: std::collections::HashMap<[u32; 3], (usize, [f32; 3])> = std::collections::HashMap::new();
+            for &c in &colors_in_shell {
+                let key = [(c[0] * 1000.0) as u32, (c[1] * 1000.0) as u32, (c[2] * 1000.0) as u32];
+                counts.entry(key).and_modify(|(cnt, _)| *cnt += 1).or_insert((1, c));
+            }
+            counts.values().max_by_key(|(cnt, _)| *cnt).map(|(_, c)| *c).unwrap_or(DEFAULT_COLOR)
+        } else {
+            DEFAULT_COLOR
+        };
+
         let bdd = shell.robust_triangulation(0.01).to_polygon().bounding_box();
         let tol = (bdd.diameter() * 0.001).max(1e-4);
         let poly = shell.robust_triangulation(tol).to_polygon();
