@@ -392,9 +392,9 @@ fn build_footprint(
         pads = pads,
         graphics = graphics,
         model = model_path,
-        ox = offset[0], oy = offset[2], oz = offset[1],
+        ox = offset[0], oy = offset[1], oz = offset[2],
         sx = scale[0], sy = scale[1], sz = scale[2],
-        rx = rotation[0], ry = rotation[1], rz = rotation[2],
+        rx = -rotation[0], ry = -rotation[1], rz = -rotation[2],
     )
 }
 
