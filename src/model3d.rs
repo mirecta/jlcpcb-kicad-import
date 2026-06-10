@@ -564,13 +564,14 @@ unsafe fn set_model(
 fn build_model_mat(offset: [f32; 3], rotation: [f32; 3], scale: [f32; 3], center: Vec3) -> Mat4 {
     // KiCad order: Scale → Rotate → Translate (around model origin, not center)
     // Both KiCad and viewer are Z-up - no coordinate swap
+    // Rotation values are negated in export to match KiCad convention
     let offset_world = Vec3::new(offset[0], offset[1], offset[2]);
     let t = Mat4::from_translation(offset_world);
     let r = Mat4::from_euler(
         glam::EulerRot::ZYX,
-        -rotation[2].to_radians(),
-        -rotation[1].to_radians(),
-        -rotation[0].to_radians(),
+        rotation[2].to_radians(),
+        rotation[1].to_radians(),
+        rotation[0].to_radians(),
     );
     let s = Mat4::from_scale(Vec3::from(scale));
     t * r * s
