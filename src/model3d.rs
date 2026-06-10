@@ -375,8 +375,8 @@ impl ModelViewer {
         }
     }
 
-    pub fn load_step(&mut self, step: &[u8], pads: &[PadInfo], drawings: &[PcbDrawing], pre_rotation: [f32; 3]) {
-        match parse_step(step, pre_rotation) {
+    pub fn load_step(&mut self, step: &[u8], pads: &[PadInfo], drawings: &[PcbDrawing], pre_rotation: [f32; 3], center_model: bool) {
+        match parse_step(step, pre_rotation, center_model) {
             Some(mesh) => {
                 let mut gd = self.gl_data.lock().unwrap();
                 gd.center = mesh.center;
@@ -1150,7 +1150,7 @@ fn step_face_colors(text: &str) -> std::collections::HashMap<u64, [f32; 3]> {
 
 // ── STEP parser (via truck) ───────────────────────────────────────────────────
 
-fn parse_step(data: &[u8], pre_rotation: [f32; 3]) -> Option<Mesh> {
+fn parse_step(data: &[u8], pre_rotation: [f32; 3], center_model: bool) -> Option<Mesh> {
     use truck_stepio::r#in::{ruststep, Table};
     use truck_meshalgo::prelude::*;
 
@@ -1249,10 +1249,13 @@ fn parse_step(data: &[u8], pre_rotation: [f32; 3]) -> Option<Mesh> {
     let min_y = verts.chunks(9).map(|c| c[1]).fold(f32::MAX, f32::min);
     for chunk in verts.chunks_mut(9) { chunk[1] += 0.1 - min_y; }
 
-    let (pre_center, _, _) = compute_bounds(&verts);
-    for chunk in verts.chunks_mut(9) {
-        chunk[0] -= pre_center.x;
-        chunk[2] -= pre_center.z;
+    // Only center if requested (custom files need centering, JLCPCB files have correct origin)
+    if center_model {
+        let (pre_center, _, _) = compute_bounds(&verts);
+        for chunk in verts.chunks_mut(9) {
+            chunk[0] -= pre_center.x;
+            chunk[2] -= pre_center.z;
+        }
     }
 
     let (center, radius, xz_half) = compute_bounds(&verts);

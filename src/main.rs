@@ -408,7 +408,8 @@ impl eframe::App for App {
                     // Prefer STEP over WRL - better format, more standard
                     if let Some(ref bytes) = step {
                         // JLCPCB STEP files are Y-up; rotate +90° around X to match viewer (Z-up)
-                        self.state.model_viewer.load_step(bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
+                        // Don't center - JLCPCB files have correct origin for pad alignment
+                        self.state.model_viewer.load_step(bytes, &pads, &drawings, [90.0, 0.0, 0.0], false);
                     } else if let Some(ref bytes) = wrl {
                         // VRML from JLCPCB is Y-up; rotate +90° around X to match viewer (Z-up)
                         self.state.model_viewer.load(bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
@@ -971,7 +972,8 @@ impl eframe::App for App {
                                             .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
                                             .collect();
                                         // Custom STEP files are typically Z-up already (no rotation needed)
-                                        self.state.model_viewer.load_step(&bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
+                                        // Center custom files since origin may not align with pads
+                                        self.state.model_viewer.load_step(&bytes, &pads, &drawings, [0.0, 0.0, 0.0], true);
                                         self.state.step_bytes = Some(bytes);
                                         self.state.status = format!("✓ Loaded custom STEP: {}",
                                             path.file_name().unwrap_or_default().to_string_lossy());
