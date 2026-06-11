@@ -1,1 +1,4 @@
 target/
+*.AppImage
+AppDir/
+linuxdeploy-*.AppImage

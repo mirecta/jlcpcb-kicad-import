@@ -20,20 +20,52 @@ A desktop app for browsing JLCPCB's parts catalog and importing components direc
 
 - Search JLCPCB's full parts database by keyword, value, LCSC number, or category (e.g. `ULN2003`, `100nF 0402`, `C7512`)
 - Preview the KiCad schematic symbol and PCB footprint before importing
-- View an interactive 3D model of the component on a PCB — supports colored WRL (from EasyEDA) and colored STEP (via [truck](https://github.com/ricosjp/truck))
+- View an interactive 3D model of the component on a PCB — supports colored WRL (from EasyEDA) and colored STEP (via [OpenCASCADE](https://dev.opencascade.org/))
 - Load a custom STEP or STL file as the 3D model when none is available from JLCPCB
 - Export a ready-to-use `.kicad_sym` symbol, `.kicad_mod` footprint, and 3D model (STEP + WRL) into your local KiCad library with one click
 
-## Building
+## Download
+
+**AppImage** (recommended) — portable, no installation required:
+- Download the latest `.AppImage` from [Releases](https://github.com/mirecta/jlcpcb-kicad-import/releases)
+- Make executable: `chmod +x jlcpcb-kicad-*.AppImage`
+- Run: `./jlcpcb-kicad-*.AppImage`
+
+The AppImage includes all dependencies (OpenCASCADE, Rust runtime, etc.) — no setup needed!
+
+## Building from Source
 
 Requires Rust (stable). Install via [rustup](https://rustup.rs).
 
 ```bash
 git clone https://github.com/mirecta/jlcpcb-kicad-import
 cd jlcpcb-kicad-import
-cargo build --release
+cargo build --release --features opencascade
 ./target/release/jlcpcb-kicad
 ```
+
+Or run directly:
+
+```bash
+cargo run --release --features opencascade
+```
+
+**OpenCASCADE support** (optional but recommended): Enables perfect per-face STEP colors matching KiCad quality. Install dependencies:
+
+```bash
+sudo apt-get install libocct-data-exchange-dev libocct-foundation-dev \
+  libocct-modeling-data-dev libocct-modeling-algorithms-dev
+```
+
+Without OpenCASCADE, STEP files will use fallback rendering (dominant color per shell).
+
+### Building AppImage
+
+```bash
+./build-appimage.sh
+```
+
+This creates a portable AppImage with all dependencies bundled.
 
 ## Usage
 
