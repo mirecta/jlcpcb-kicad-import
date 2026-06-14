@@ -49,6 +49,7 @@ pub struct PadInfo {
     pub h:  f32,
     pub shape: String,  // "circle", "rect", "oval"
     pub drill: f32,     // 0 = SMD; >0 = through-hole drill diameter in mm
+    pub rotation: f32,  // rotation in degrees
 }
 
 // ── Footprint drawing (silkscreen / fab layer flat geometry) ──────────────────
@@ -351,7 +352,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill })
+                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, rotation: p.rotation })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -373,7 +374,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill })
+                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, rotation: p.rotation })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -596,24 +597,63 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
 
     let pc  = [0.85_f32, 0.68, 0.08]; // copper
 
+    // Helper: rotate point around origin
+    let rotate_xy = |x: f32, y: f32, deg: f32| -> (f32, f32) {
+        let rad = deg.to_radians();
+        let (s, c) = (rad.sin(), rad.cos());
+        (x * c - y * s, x * s + y * c)
+    };
+
+    // Helper: add rotated quad (two triangles)
+    let rotated_quad = |v: &mut Vec<f32>, cx: f32, cy: f32, hw: f32, hh: f32, rot: f32, y: f32, c: [f32; 3]| {
+        // Four corners in local space
+        let corners = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)];
+        let mut pts = [(0.0, 0.0); 4];
+        for (i, &(lx, ly)) in corners.iter().enumerate() {
+            let (dx, dy) = rotate_xy(lx, ly, rot);
+            pts[i] = (cx + dx, cy + dy);
+        }
+        // Two triangles: 0-1-2, 0-2-3
+        let n = [0.0, 0.0, 1.0];
+        for &tri in &[[0, 1, 2], [0, 2, 3]] {
+            for &i in &tri {
+                v.extend_from_slice(&[pts[i].0, pts[i].1, y]);
+                v.extend_from_slice(&n);
+                v.extend_from_slice(&c);
+            }
+        }
+    };
+
     // Pads and through-hole barrels
     let draw_pad = |v: &mut Vec<f32>, pad: &PadInfo, hw: f32, hh: f32, y: f32, c: [f32; 3]| {
+        let rot = pad.rotation;
+
         match pad.shape.as_str() {
             "circle" => circle_y(v, pad.cx, pad.cy, hw.max(hh), y, c),
             "oval" => {
                 if (hw - hh).abs() < 0.01 {
+                    // Round pad - rotation doesn't matter
                     circle_y(v, pad.cx, pad.cy, hw, y, c);
                 } else if hw > hh {
-                    quad_y(v, pad.cx - hw + hh, pad.cx + hw - hh, pad.cy - hh, pad.cy + hh, y, c);
-                    circle_y(v, pad.cx - hw + hh, pad.cy, hh, y, c);
-                    circle_y(v, pad.cx + hw - hh, pad.cy, hh, y, c);
+                    // Horizontal oval: rectangle + two end circles
+                    let (dx1, dy1) = rotate_xy(-hw + hh, 0.0, rot);
+                    let (dx2, dy2) = rotate_xy(hw - hh, 0.0, rot);
+                    rotated_quad(v, pad.cx, pad.cy, hw - hh, hh, rot, y, c);
+                    circle_y(v, pad.cx + dx1, pad.cy + dy1, hh, y, c);
+                    circle_y(v, pad.cx + dx2, pad.cy + dy2, hh, y, c);
                 } else {
-                    quad_y(v, pad.cx - hw, pad.cx + hw, pad.cy - hh + hw, pad.cy + hh - hw, y, c);
-                    circle_y(v, pad.cx, pad.cy - hh + hw, hw, y, c);
-                    circle_y(v, pad.cx, pad.cy + hh - hw, hw, y, c);
+                    // Vertical oval: rectangle + two end circles
+                    let (dx1, dy1) = rotate_xy(0.0, -hh + hw, rot);
+                    let (dx2, dy2) = rotate_xy(0.0, hh - hw, rot);
+                    rotated_quad(v, pad.cx, pad.cy, hw, hh - hw, rot, y, c);
+                    circle_y(v, pad.cx + dx1, pad.cy + dy1, hw, y, c);
+                    circle_y(v, pad.cx + dx2, pad.cy + dy2, hw, y, c);
                 }
             }
-            _ => quad_y(v, pad.cx - hw, pad.cx + hw, pad.cy - hh, pad.cy + hh, y, c),
+            _ => {
+                // Rectangle - use rotated quad
+                rotated_quad(v, pad.cx, pad.cy, hw, hh, rot, y, c);
+            }
         }
     };
 
