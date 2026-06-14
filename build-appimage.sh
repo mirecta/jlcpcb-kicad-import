@@ -15,8 +15,8 @@ echo "🔨 Building ${APP_NAME} v${VERSION} for ${ARCH}..."
 rm -rf AppDir *.AppImage
 
 # Build release binary with OpenCASCADE
-echo "📦 Compiling with OpenCASCADE..."
-cargo build --release --features opencascade
+echo "📦 Compiling..."
+cargo build --release
 
 # Create AppDir structure
 echo "📁 Creating AppDir..."

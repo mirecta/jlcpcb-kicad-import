@@ -909,149 +909,9 @@ fn parse_wrl(data: &[u8], pre_rotation: [f32; 3]) -> Option<Mesh> {
     Some(Mesh { count: (verts.len() / 9) as i32, data: verts, center, radius, xy_half })
 }
 
-// ── STEP color extraction ─────────────────────────────────────────────────────
+// ── STEP parser (OpenCASCADE) ─────────────────────────────────────────────────
 
-/// Build a map: shell_id → ordered list of face colors
-fn build_shell_face_map(text: &str, face_colors: &std::collections::HashMap<u64, [f32; 3]>) -> std::collections::HashMap<u64, Vec<[f32; 3]>> {
-    use std::collections::HashMap;
-    let mut result: HashMap<u64, Vec<[f32; 3]>> = HashMap::new();
-    const DEFAULT: [f32; 3] = [0.75, 0.75, 0.75];
-
-    for line in text.lines() {
-        let line = line.trim();
-        let Some(line) = line.strip_prefix('#') else { continue };
-        let Some(eq) = line.find('=') else { continue };
-        let Ok(id) = line[..eq].trim().parse::<u64>() else { continue };
-        let content = line[eq + 1..].trim().trim_end_matches(';').trim();
-
-        if content.starts_with("CLOSED_SHELL") || content.starts_with("OPEN_SHELL") {
-            let face_ids = step_refs(content);
-            let colors: Vec<[f32; 3]> = face_ids.iter()
-                .map(|&fid| face_colors.get(&fid).copied().unwrap_or(DEFAULT))
-                .collect();
-            result.insert(id, colors);
-        }
-    }
-    result
-}
-
-fn step_refs(s: &str) -> Vec<u64> {
-    let mut out = Vec::new();
-    let mut rest = s;
-    while let Some(p) = rest.find('#') {
-        rest = &rest[p + 1..];
-        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-        if end > 0 { if let Ok(id) = rest[..end].parse::<u64>() { out.push(id); } }
-        rest = &rest[end.min(rest.len())..];
-    }
-    out
-}
-
-fn step_floats(s: &str) -> Vec<f64> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    let b = s.as_bytes();
-    while i < b.len() {
-        // skip to a digit or minus that starts a number
-        if b[i] == b'-' || b[i].is_ascii_digit() {
-            let start = i;
-            if b[i] == b'-' { i += 1; }
-            while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.' || b[i] == b'e' || b[i] == b'E' || ((b[i] == b'+' || b[i] == b'-') && i > 0 && (b[i-1] == b'e' || b[i-1] == b'E'))) {
-                i += 1;
-            }
-            if let Ok(f) = s[start..i].parse::<f64>() { out.push(f); }
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-/// Parse the STEP text and return a map: face_entity_id → [r, g, b]
-/// Follows the full AP214 color chain:
-/// STYLED_ITEM → PRESENTATION_STYLE_ASSIGNMENT → SURFACE_STYLE_USAGE →
-/// SURFACE_SIDE_STYLE → SURFACE_STYLE_FILL_AREA → FILL_AREA_STYLE →
-/// FILL_AREA_STYLE_COLOUR → COLOUR_RGB
-fn step_face_colors(text: &str) -> std::collections::HashMap<u64, [f32; 3]> {
-    use std::collections::HashMap;
-
-    let mut entity_name: HashMap<u64, String> = HashMap::new();
-    let mut entity_refs: HashMap<u64, Vec<u64>> = HashMap::new();
-    let mut id_to_color: HashMap<u64, [f32; 3]> = HashMap::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        let Some(line) = line.strip_prefix('#') else { continue };
-        let Some(eq) = line.find('=') else { continue };
-        let Ok(id) = line[..eq].trim().parse::<u64>() else { continue };
-        let content = line[eq + 1..].trim().trim_end_matches(';').trim();
-
-        let name_end = content.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(content.len());
-        let name = content[..name_end].to_uppercase();
-        let refs = step_refs(content);
-
-        if name == "COLOUR_RGB" {
-            let nums = step_floats(content);
-            if nums.len() >= 3 {
-                let color = [nums[0] as f32, nums[1] as f32, nums[2] as f32];
-                id_to_color.insert(id, color);
-            }
-        }
-
-        entity_name.insert(id, name);
-        entity_refs.insert(id, refs);
-    }
-
-    // Propagate colors up through the chain (multiple passes until stable)
-    let chain = [
-        "FILL_AREA_STYLE_COLOUR",
-        "FILL_AREA_STYLE",
-        "SURFACE_STYLE_FILL_AREA",
-        "SURFACE_SIDE_STYLE",
-        "SURFACE_STYLE_USAGE",
-        "CURVE_STYLE",
-        "PRESENTATION_STYLE_ASSIGNMENT",
-    ];
-    for _ in 0..2 {
-        for ty in &chain {
-            let ids: Vec<u64> = entity_name.iter()
-                .filter(|(_, n)| n.as_str() == *ty)
-                .map(|(&id, _)| id)
-                .collect();
-            for id in ids {
-                if id_to_color.contains_key(&id) { continue; }
-                let refs = entity_refs.get(&id).cloned().unwrap_or_default();
-                for r in refs {
-                    if let Some(&c) = id_to_color.get(&r) {
-                        id_to_color.insert(id, c);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // Build face_id → color from STYLED_ITEM and OVER_RIDING_STYLED_ITEM
-    let mut face_colors: HashMap<u64, [f32; 3]> = HashMap::new();
-    for (&_id, name) in &entity_name {
-        if name != "STYLED_ITEM" && name != "OVER_RIDING_STYLED_ITEM" { continue; }
-        let refs = entity_refs.get(&_id).cloned().unwrap_or_default();
-        if refs.len() < 2 { continue; }
-        let shape_ref = *refs.last().unwrap();
-        for &r in &refs[..refs.len() - 1] {
-            if let Some(&c) = id_to_color.get(&r) {
-                face_colors.insert(shape_ref, c);
-                break;
-            }
-        }
-    }
-
-    face_colors
-}
-
-// ── STEP parser (via truck) ───────────────────────────────────────────────────
-
-// Helper to create Mesh from raw vertex data (shared by OCC and truck parsers)
+// Helper to create Mesh from raw vertex data
 fn parse_step_from_verts(mut verts: Vec<f32>, pre_rotation: [f32; 3], center_model: bool) -> Option<Mesh> {
     if verts.is_empty() { return None; }
 
@@ -1094,100 +954,17 @@ fn parse_step_from_verts(mut verts: Vec<f32>, pre_rotation: [f32; 3], center_mod
 }
 
 fn parse_step(data: &[u8], pre_rotation: [f32; 3], center_model: bool) -> Option<Mesh> {
-    // Try OpenCASCADE first for perfect per-face colors (if available)
-    #[cfg(feature = "opencascade")]
-    {
-        match crate::step_occ_ffi::parse_step_occ(data) {
-            Ok(verts) => {
-                eprintln!("[STEP] ✓ OpenCASCADE: {} vertices with per-face colors", verts.len() / 9);
-                return parse_step_from_verts(verts, pre_rotation, center_model);
-            }
-            Err(e) => {
-                eprintln!("[STEP] ⚠ OpenCASCADE failed ({}), falling back to truck", e);
-            }
+    // Parse STEP using OpenCASCADE for perfect per-face colors
+    match crate::step_occ_ffi::parse_step_occ(data) {
+        Ok(verts) => {
+            eprintln!("[STEP] ✓ OpenCASCADE: {} vertices with per-face colors", verts.len() / 9);
+            parse_step_from_verts(verts, pre_rotation, center_model)
+        }
+        Err(e) => {
+            eprintln!("[STEP] ✗ OpenCASCADE failed: {}", e);
+            None
         }
     }
-
-    // Fallback to truck parser (dominant color per shell)
-    eprintln!("[STEP] Using truck parser (dominant color per shell)");
-
-    use truck_stepio::r#in::{ruststep, Table};
-    use truck_meshalgo::prelude::*;
-
-    let s = String::from_utf8_lossy(data);
-    let face_colors = step_face_colors(s.as_ref());
-    let exchange = ruststep::parser::parse(s.as_ref()).ok()?;
-    let data_section = exchange.data.first()?;
-    let table = Table::from_data_section(data_section);
-
-    let mut verts: Vec<f32> = Vec::new();
-    const DEFAULT_COLOR: [f32; 3] = [0.75, 0.75, 0.75];
-
-    // Build shell→colors map from raw STEP - each shell gets list of its face colors
-    let shell_face_colors = build_shell_face_map(s.as_ref(), &face_colors);
-
-    // Render shells - for now use whole shell with dominant color
-    // TODO: Per-face colors need custom STEP geometry parser, truck API doesn't support it
-    for (shell_id, shell_holder) in table.shell.iter() {
-        let shell = match table.to_compressed_shell(shell_holder) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        // Get face colors for this shell - pick most common
-        let colors_in_shell = shell_face_colors.get(shell_id).cloned().unwrap_or_default();
-        let color = if !colors_in_shell.is_empty() {
-            // Count color frequency
-            let mut counts: std::collections::HashMap<[u32; 3], (usize, [f32; 3])> = std::collections::HashMap::new();
-            for &c in &colors_in_shell {
-                let key = [(c[0] * 1000.0) as u32, (c[1] * 1000.0) as u32, (c[2] * 1000.0) as u32];
-                counts.entry(key).and_modify(|(cnt, _)| *cnt += 1).or_insert((1, c));
-            }
-            counts.values().max_by_key(|(cnt, _)| *cnt).map(|(_, c)| *c).unwrap_or(DEFAULT_COLOR)
-        } else {
-            DEFAULT_COLOR
-        };
-
-        let bdd = shell.robust_triangulation(0.01).to_polygon().bounding_box();
-        let tol = (bdd.diameter() * 0.001).max(1e-4);
-        let poly = shell.robust_triangulation(tol).to_polygon();
-
-        let positions = poly.positions();
-        let normals   = poly.normals();
-        for tri in poly.tri_faces() {
-            let p0 = positions[tri[0].pos];
-            let p1 = positions[tri[1].pos];
-            let p2 = positions[tri[2].pos];
-            let e1 = [p1.x-p0.x, p1.y-p0.y, p1.z-p0.z];
-            let e2 = [p2.x-p0.x, p2.y-p0.y, p2.z-p0.z];
-            let fn_ = [
-                e1[1]*e2[2] - e1[2]*e2[1],
-                e1[2]*e2[0] - e1[0]*e2[2],
-                e1[0]*e2[1] - e1[1]*e2[0],
-            ];
-            let flen = (fn_[0]*fn_[0]+fn_[1]*fn_[1]+fn_[2]*fn_[2]).sqrt().max(1e-9);
-            let face_n = [(fn_[0]/flen) as f32, (fn_[1]/flen) as f32, (fn_[2]/flen) as f32];
-
-            for v in tri {
-                let p = positions[v.pos];
-                let (nx, ny, nz) = match v.nor {
-                    Some(ni) => {
-                        let n = normals[ni];
-                        (n.x as f32, n.y as f32, n.z as f32)
-                    }
-                    None => (face_n[0], face_n[1], face_n[2]),
-                };
-                verts.extend_from_slice(&[
-                    p.x as f32, p.y as f32, p.z as f32,
-                    nx, ny, nz,
-                    color[0], color[1], color[2],
-                ]);
-            }
-        }
-    }
-
-    // Use same helper as OCC parser for rotation/centering
-    parse_step_from_verts(verts, pre_rotation, center_model)
 }
 
 fn flat_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {

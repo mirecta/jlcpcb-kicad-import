@@ -35,29 +35,27 @@ The AppImage includes all dependencies (OpenCASCADE, Rust runtime, etc.) — no 
 
 ## Building from Source
 
-Requires Rust (stable). Install via [rustup](https://rustup.rs).
+Requires:
+- Rust (stable) — install via [rustup](https://rustup.rs)
+- OpenCASCADE 7.8+ — for STEP file parsing with per-face colors
 
 ```bash
+# Install OpenCASCADE
+sudo apt-get install libocct-data-exchange-dev libocct-foundation-dev \
+  libocct-modeling-data-dev libocct-modeling-algorithms-dev
+
+# Build
 git clone https://github.com/mirecta/jlcpcb-kicad-import
 cd jlcpcb-kicad-import
-cargo build --release --features opencascade
+cargo build --release
 ./target/release/jlcpcb-kicad
 ```
 
 Or run directly:
 
 ```bash
-cargo run --release --features opencascade
+cargo run --release
 ```
-
-**OpenCASCADE support** (optional but recommended): Enables perfect per-face STEP colors matching KiCad quality. Install dependencies:
-
-```bash
-sudo apt-get install libocct-data-exchange-dev libocct-foundation-dev \
-  libocct-modeling-data-dev libocct-modeling-algorithms-dev
-```
-
-Without OpenCASCADE, STEP files will use fallback rendering (dominant color per shell).
 
 ### Building AppImage
 

@@ -3,8 +3,6 @@ mod export;
 mod model3d;
 mod preview;
 mod settings;
-
-#[cfg(feature = "opencascade")]
 mod step_occ_ffi;
 
 use api::{Component, Pin, SearchResult};

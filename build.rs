@@ -10,11 +10,12 @@ fn main() {
     let occt_available = occt_include.exists();
 
     if !occt_available {
-        println!("cargo:warning=OpenCASCADE not found - STEP colors will use fallback (dominant per shell)");
-        println!("cargo:warning=To enable full STEP color support, install:");
-        println!("cargo:warning=  sudo apt-get install libocct-data-exchange-dev libocct-foundation-dev \\");
-        println!("cargo:warning=    libocct-modeling-data-dev libocct-modeling-algorithms-dev");
-        return;
+        eprintln!("\n❌ ERROR: OpenCASCADE is required but not found!\n");
+        eprintln!("This application requires OpenCASCADE 7.8+ for STEP file parsing.");
+        eprintln!("\nInstall it with:");
+        eprintln!("  sudo apt-get install libocct-data-exchange-dev libocct-foundation-dev \\");
+        eprintln!("    libocct-modeling-data-dev libocct-modeling-algorithms-dev\n");
+        panic!("OpenCASCADE not found - cannot build without it");
     }
 
     // Ubuntu/Debian OCCT 7.8 paths (no pkg-config provided)
