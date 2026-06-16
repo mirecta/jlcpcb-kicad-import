@@ -637,7 +637,8 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
     quad_y_holed(&mut v, half, &holes, 0.0,    top_green);
     quad_y_holed(&mut v, half, &holes, -thick, bot_green);
 
-    let pc  = [0.85_f32, 0.68, 0.08]; // copper
+    let pc   = [0.85_f32, 0.68, 0.08]; // copper
+    let fr4  = [0.52_f32, 0.42, 0.22]; // raw FR4 board material (brownish)
 
     // Helper: rotate point around origin
     let rotate_xy = |x: f32, y: f32, deg: f32| -> (f32, f32) {
@@ -720,8 +721,8 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
         if pad.drill > 0.0 {
             let dr = pad.drill * 0.5;  // hole radius in mm
             if pad.npth {
-                // Non-plated through hole: just a barrel, no copper annular ring
-                cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.0, -thick, top_green);
+                // Non-plated through hole: barrel is raw FR4, no copper ring
+                cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.0, -thick, fr4);
             } else if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
                 // Oval milled slot through-hole
                 let (hole_hw, hole_hh) = if hw <= hh {
