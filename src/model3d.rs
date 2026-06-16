@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use eframe::glow::{self, HasContext};
 use egui::Sense;
 use glam::{Mat3, Mat4, Vec3};
+use earcutr;
 
 // ── GLSL ─────────────────────────────────────────────────────────────────────
 
@@ -628,11 +629,11 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
         }
     }
 
-    // Top surface (Z=0) and bottom surface (Z=-thick) — tessellated with real holes
+    // Top surface (Z=0) and bottom surface (Z=-thick) — earcut triangulation with real holes
     let top_green = [0.10_f32, 0.42, 0.12];
     let bot_green = [0.07_f32, 0.30, 0.09];
-    quad_y_holed(&mut v, half, &holes, 0.0,    top_green);
-    quad_y_holed(&mut v, half, &holes, -thick, bot_green);
+    surface_with_holes(&mut v, half, &holes, 0.0,    top_green);
+    surface_with_holes(&mut v, half, &holes, -thick, bot_green);
 
     let pc   = [0.85_f32, 0.68, 0.08]; // copper
     let fr4  = [0.52_f32, 0.42, 0.22]; // raw FR4 board material (brownish)
@@ -718,35 +719,60 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
         if pad.drill > 0.0 {
             let dr = pad.drill * 0.5;  // hole radius in mm
             if pad.npth {
-                // Non-plated through hole: barrel is raw FR4, no copper ring
+                // Non-plated through hole: barrel only, raw FR4 color, no copper ring
                 if pad.drill_slot > pad.drill + 0.01 {
                     slot_hole_barrel(&mut v, pad.cx, pad.cy, pad.drill_slot * 0.5, dr, pad.rotation, 0.0, -thick, fr4);
                 } else {
                     cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.0, -thick, fr4);
                 }
-            } else if pad.drill_slot > pad.drill + 0.01 {
-                // Explicit oval milled slot (from EasyEDA holePoints data)
-                let half_slot = pad.drill_slot * 0.5;
-                let (hole_hw, hole_hh) = if hw >= hh { (half_slot, dr) } else { (dr, half_slot) };
-                // Copper pad on top/bottom
-                draw_pad(&mut v, pad, hw, hh, 0.04, pc);
-                draw_pad(&mut v, pad, hw, hh, -thick - 0.04, pc);
-                // PCB-green oval punch covering the slot opening
-                draw_pad(&mut v, pad, hole_hw, hole_hh, 0.07, top_green);
-                draw_pad(&mut v, pad, hole_hw, hole_hh, -thick - 0.07, bot_green);
-                // Proper oval slot barrel (flat walls + semicylinder end-caps)
-                slot_hole_barrel(&mut v, pad.cx, pad.cy, half_slot, dr, pad.rotation, 0.04, -thick - 0.04, pc);
-            } else if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
-                // Oval copper pad with circular drill — draw oval pad + circular barrel
-                draw_pad(&mut v, pad, hw, hh, 0.04, pc);
-                draw_pad(&mut v, pad, hw, hh, -thick - 0.04, pc);
-                cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.04, -thick - 0.04, pc);
             } else {
-                // Circular/rect through-hole: annular ring approach
-                let r_o = hw.max(hh);
-                cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.0, -thick, pc);
-                ring_y(&mut v, pad.cx, pad.cy, dr, r_o,  0.05,         pc);
-                ring_y(&mut v, pad.cx, pad.cy, dr, r_o, -thick - 0.05, pc);
+                // Plated THT pad: copper annular ring (outer pad shape minus drill hole) + barrel
+
+                // Build outer copper pad polygon (CCW)
+                let rad_r = pad.rotation.to_radians();
+                let (rs, rc) = (rad_r.sin(), rad_r.cos());
+                let rot_pt = |lx: f32, ly: f32| -> (f64, f64) {
+                    ((pad.cx + lx*rc - ly*rs) as f64, (pad.cy + lx*rs + ly*rc) as f64)
+                };
+                let outer_ccw: Vec<f64> = match pad.shape.as_str() {
+                    "oval" => {
+                        let diff = hw - hh;
+                        if diff.abs() < 0.01 {
+                            capsule_poly(pad.cx, pad.cy, 0.0, 0.0, hw)
+                        } else if diff > 0.0 {
+                            let ax = (hw - hh) * rc; let ay = (hw - hh) * rs;
+                            capsule_poly(pad.cx, pad.cy, ax, ay, hh)
+                        } else {
+                            let ax = -(hh - hw) * rs; let ay = (hh - hw) * rc;
+                            capsule_poly(pad.cx, pad.cy, ax, ay, hw)
+                        }
+                    }
+                    "circle" => capsule_poly(pad.cx, pad.cy, 0.0, 0.0, hw.max(hh)),
+                    _ => {
+                        // rect / roundrect / polygon — use rotated rectangle
+                        let (p0,p1,p2,p3) = (rot_pt(-hw,-hh), rot_pt(hw,-hh), rot_pt(hw,hh), rot_pt(-hw,hh));
+                        vec![p0.0,p0.1, p1.0,p1.1, p2.0,p2.1, p3.0,p3.1]
+                    }
+                };
+
+                // Build inner drill hole polygon (CCW; will be reversed to CW inside tri_annular)
+                let (drill_ax, drill_ay) = if pad.drill_slot > pad.drill + 0.01 {
+                    let half_ext = (pad.drill_slot - pad.drill) * 0.5;
+                    if hw >= hh { (half_ext * rc, half_ext * rs) }
+                    else        { (-half_ext * rs, half_ext * rc) }
+                } else { (0.0, 0.0) };
+                let inner_ccw = capsule_poly(pad.cx, pad.cy, drill_ax, drill_ay, dr);
+
+                // Top and bottom copper annular ring
+                tri_annular(&outer_ccw, &inner_ccw, 0.04,         false, pc, &mut v);
+                tri_annular(&outer_ccw, &inner_ccw, -thick - 0.04, true,  pc, &mut v);
+
+                // Barrel through the board
+                if pad.drill_slot > pad.drill + 0.01 {
+                    slot_hole_barrel(&mut v, pad.cx, pad.cy, pad.drill_slot * 0.5, dr, pad.rotation, 0.04, -thick - 0.04, pc);
+                } else {
+                    cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.04, -thick - 0.04, pc);
+                }
             }
         } else {
             draw_pad(&mut v, pad, hw, hh, 0.05, pc);
@@ -953,42 +979,102 @@ fn slot_hole_barrel(v: &mut Vec<f32>, cx: f32, cy: f32, half_slot: f32, r: f32, 
     }
 }
 
-// PCB surface quad with drill holes/slots cut out (grid tessellation).
-// holes: (cx, cy, half_ax, half_ay, r) — circular when ax=ay=0, slot otherwise.
-fn quad_y_holed(v: &mut Vec<f32>, half: f32, holes: &[(f32, f32, f32, f32, f32)], z: f32, c: [f32; 3]) {
-    const N: i32 = 96;
-    let step = (2.0 * half) / N as f32;
-    let nrm: [f32; 3] = [0.0, 0.0, if z >= 0.0 { 1.0 } else { -1.0 }];
-    for i in 0..N {
-        for j in 0..N {
-            let x0 = -half + i as f32 * step;
-            let x1 = x0 + step;
-            let y0 = -half + j as f32 * step;
-            let y1 = y0 + step;
-            let px = (x0 + x1) * 0.5;
-            let py = (y0 + y1) * 0.5;
-            let in_hole = holes.iter().any(|&(hx, hy, ax, ay, r)| {
-                // Point-to-line-segment distance (segment from centre-axis to centre+axis)
-                let ex = px - hx; let ey = py - hy;
-                let len2 = ax * ax + ay * ay;
-                let t = if len2 > 1e-10 {
-                    ((ex * ax + ey * ay) / len2).clamp(-1.0, 1.0)
-                } else { 0.0 };
-                let qx = ex - t * ax; let qy = ey - t * ay;
-                qx * qx + qy * qy < r * r
-            });
-            if in_hole { continue; }
-            let pts = [[x0,y0,z],[x1,y0,z],[x1,y1,z],[x0,y1,z]];
-            let order: [(usize,usize,usize); 2] = if z >= 0.0 { [(0,1,2),(0,2,3)] } else { [(0,2,1),(0,3,2)] };
-            for (a,b,ci) in order {
-                for &k in &[a, b, ci] {
-                    v.extend_from_slice(&pts[k]);
-                    v.extend_from_slice(&nrm);
-                    v.extend_from_slice(&c);
-                }
-            }
+// Generate outline polygon (CCW) for a capsule/circle shape.
+// (cx,cy,ax,ay,r): ax,ay = half-axis vector (0,0 = circle), r = minor radius.
+fn capsule_poly(cx: f32, cy: f32, ax: f32, ay: f32, r: f32) -> Vec<f64> {
+    const N: usize = 20; // segments per semicircle
+    let len = (ax*ax + ay*ay).sqrt();
+    if len < 1e-6 {
+        // Circle
+        return (0..N*2).flat_map(|i| {
+            let a = i as f32 * std::f32::consts::TAU / (N * 2) as f32;
+            vec![(cx + r * a.cos()) as f64, (cy + r * a.sin()) as f64]
+        }).collect();
+    }
+    let base = ay.atan2(ax);
+    let mut pts: Vec<f64> = Vec::new();
+    // +along semicircle (right end)
+    let (e2x, e2y) = (cx + ax, cy + ay);
+    for i in 0..=N {
+        let a = base - std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / N as f32;
+        pts.push((e2x + r * a.cos()) as f64);
+        pts.push((e2y + r * a.sin()) as f64);
+    }
+    // -along semicircle (left end)
+    let (e1x, e1y) = (cx - ax, cy - ay);
+    for i in 0..=N {
+        let a = base + std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / N as f32;
+        pts.push((e1x + r * a.cos()) as f64);
+        pts.push((e1y + r * a.sin()) as f64);
+    }
+    pts
+}
+
+// Triangulate a flat surface polygon with arbitrary holes using earcut.
+// outer: CCW flat [x0,y0, x1,y1, ...]; holes: list of CW flat polygons (hole outlines).
+fn tri_surface_with_holes(
+    outer: &[f64],
+    holes: &[Vec<f64>],
+    z: f32, flip_winding: bool,
+    c: [f32; 3],
+    v: &mut Vec<f32>,
+) {
+    let nrm: [f32; 3] = if !flip_winding { [0.0, 0.0, 1.0] } else { [0.0, 0.0, -1.0] };
+    let mut data: Vec<f64> = outer.to_vec();
+    let mut hole_starts: Vec<usize> = Vec::new();
+    for hole in holes {
+        hole_starts.push(data.len() / 2);
+        // earcut expects holes in opposite winding to outer; our holes are CW already
+        data.extend_from_slice(hole);
+    }
+    let indices = match earcutr::earcut(&data, &hole_starts, 2) {
+        Ok(idx) => idx,
+        Err(_) => return,
+    };
+    for tri in indices.chunks(3) {
+        if tri.len() < 3 { continue; }
+        let order: [usize; 3] = if !flip_winding { [tri[0], tri[1], tri[2]] }
+                                else              { [tri[0], tri[2], tri[1]] };
+        for &i in &order {
+            let x = data[i * 2] as f32;
+            let y = data[i * 2 + 1] as f32;
+            v.extend_from_slice(&[x, y, z]);
+            v.extend_from_slice(&nrm);
+            v.extend_from_slice(&c);
         }
     }
+}
+
+// PCB surface (rectangle) with drill/slot holes cut out — proper earcut triangulation.
+// holes: (cx, cy, half_ax, half_ay, r) — circular when ax=ay=0, slot otherwise.
+fn surface_with_holes(v: &mut Vec<f32>, half: f32, holes: &[(f32, f32, f32, f32, f32)], z: f32, c: [f32; 3]) {
+    // Outer rectangle CCW (when Z is up and we look from above)
+    let outer: Vec<f64> = vec![
+        -half as f64, -half as f64,
+         half as f64, -half as f64,
+         half as f64,  half as f64,
+        -half as f64,  half as f64,
+    ];
+    // Each hole is a CW polygon (opposite winding to outer CCW)
+    let hole_polys: Vec<Vec<f64>> = holes.iter().map(|&(hx, hy, ax, ay, r)| {
+        let ccw = capsule_poly(hx, hy, ax, ay, r);
+        // Reverse to CW
+        let n = ccw.len() / 2;
+        let mut cw = Vec::with_capacity(ccw.len());
+        for i in (0..n).rev() { cw.push(ccw[i*2]); cw.push(ccw[i*2+1]); }
+        cw
+    }).collect();
+    let flip = z < 0.0;
+    tri_surface_with_holes(&outer, &hole_polys, z, flip, c, v);
+}
+
+// Flat annular ring: outer shape minus inner hole, triangulated with earcut.
+// outer_poly: CCW; inner_poly: CCW (will be reversed to CW for hole).
+fn tri_annular(outer_ccw: &[f64], inner_ccw: &[f64], z: f32, flip: bool, c: [f32;3], v: &mut Vec<f32>) {
+    let n = inner_ccw.len() / 2;
+    let mut inner_cw = Vec::with_capacity(inner_ccw.len());
+    for i in (0..n).rev() { inner_cw.push(inner_ccw[i*2]); inner_cw.push(inner_ccw[i*2+1]); }
+    tri_surface_with_holes(outer_ccw, &[inner_cw], z, flip, c, v);
 }
 
 // Flat quad in XY plane at given Z, x0..x1, y0..y1 (CCW from above = Z-up)

@@ -24,6 +24,7 @@ anyhow = "1"
 arboard = "3"
 image = { version = "0.25", features = ["png"] }
 libc = "0.2"
+earcutr = "0.4"
 
 [build-dependencies]
 # No dependencies needed - build.rs uses system tools
