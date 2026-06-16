@@ -1621,44 +1621,30 @@ fn show_footprint_preview(
                 painter.add(egui::Shape::convex_polygon(corners, copper, pad_border));
             }
             "oval" => {
+                // Draw as pill: filled rect + two filled end circles, no seam outline
                 let diff = hw - hh;
                 if diff.abs() < 0.01 {
+                    // Circular
                     painter.circle_filled(pcx, hw * scale, copper);
-                    painter.circle_stroke(pcx, hw * scale, pad_border);
                 } else if diff > 0.0 {
                     // Wider than tall: pill along X
                     let c1 = rot_pt(-diff, 0.0);
                     let c2 = rot_pt( diff, 0.0);
-                    let cs2 = vec![
-                        rot_pt(-diff, -hh), rot_pt(diff, -hh),
-                        rot_pt( diff,  hh), rot_pt(-diff, hh),
-                    ];
-                    painter.add(egui::Shape::convex_polygon(cs2, copper, egui::Stroke::NONE));
-                    painter.circle_filled(c1, hh * scale, copper);
-                    painter.circle_filled(c2, hh * scale, copper);
-                    // Outline: draw pill border path
                     painter.add(egui::Shape::convex_polygon(
                         vec![rot_pt(-diff,-hh), rot_pt(diff,-hh), rot_pt(diff,hh), rot_pt(-diff,hh)],
-                        egui::Color32::TRANSPARENT, pad_border));
-                    painter.circle_stroke(c1, hh * scale, pad_border);
-                    painter.circle_stroke(c2, hh * scale, pad_border);
+                        copper, egui::Stroke::NONE));
+                    painter.circle_filled(c1, hh * scale, copper);
+                    painter.circle_filled(c2, hh * scale, copper);
                 } else {
                     // Taller than wide: pill along Y
                     let ext = hh - hw;
                     let c1 = rot_pt(0.0, -ext);
                     let c2 = rot_pt(0.0,  ext);
-                    let cs2 = vec![
-                        rot_pt(-hw, -ext), rot_pt(hw, -ext),
-                        rot_pt( hw,  ext), rot_pt(-hw, ext),
-                    ];
-                    painter.add(egui::Shape::convex_polygon(cs2, copper, egui::Stroke::NONE));
-                    painter.circle_filled(c1, hw * scale, copper);
-                    painter.circle_filled(c2, hw * scale, copper);
                     painter.add(egui::Shape::convex_polygon(
                         vec![rot_pt(-hw,-ext), rot_pt(hw,-ext), rot_pt(hw,ext), rot_pt(-hw,ext)],
-                        egui::Color32::TRANSPARENT, pad_border));
-                    painter.circle_stroke(c1, hw * scale, pad_border);
-                    painter.circle_stroke(c2, hw * scale, pad_border);
+                        copper, egui::Stroke::NONE));
+                    painter.circle_filled(c1, hw * scale, copper);
+                    painter.circle_filled(c2, hw * scale, copper);
                 }
             }
             "polygon" => {
