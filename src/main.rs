@@ -1556,7 +1556,29 @@ fn show_footprint_preview(
             let pw  = (g_width * scale).max(1.0);
             match g {
                 api::FpGraphic::Line { x1, y1, x2, y2, .. } => {
-                    painter.line_segment([ts(*x1, *y1), ts(*x2, *y2)], egui::Stroke::new(pw, col));
+                    // Draw as capsule (rect + round caps) so adjacent segments' caps
+                    // fill corner gaps instead of leaving rectangular notches
+                    let p1 = ts(*x1, *y1);
+                    let p2 = ts(*x2, *y2);
+                    let r = pw * 0.5;
+                    let dx = p2.x - p1.x;
+                    let dy = p2.y - p1.y;
+                    let len = (dx*dx + dy*dy).sqrt();
+                    if len < 0.001 {
+                        painter.circle_filled(p1, r, col);
+                    } else {
+                        let nx = -dy / len * r;
+                        let ny =  dx / len * r;
+                        let poly = vec![
+                            egui::pos2(p1.x + nx, p1.y + ny),
+                            egui::pos2(p2.x + nx, p2.y + ny),
+                            egui::pos2(p2.x - nx, p2.y - ny),
+                            egui::pos2(p1.x - nx, p1.y - ny),
+                        ];
+                        painter.add(egui::Shape::convex_polygon(poly, col, egui::Stroke::NONE));
+                        painter.circle_filled(p1, r, col);
+                        painter.circle_filled(p2, r, col);
+                    }
                 }
                 api::FpGraphic::Circle { cx, cy, r, .. } => {
                     painter.circle_stroke(ts(*cx, *cy), r * scale, egui::Stroke::new(pw, col));
@@ -1615,9 +1637,13 @@ fn show_footprint_preview(
                             let angle = a1 + sweep * (i as f32 / n as f32);
                             ts(ocx + r * angle.cos(), ocy + r * angle.sin())
                         }).collect();
-                        for w in pts.windows(2) {
-                            painter.line_segment([w[0], w[1]], stroke);
-                        }
+                        // Draw as a single open PathShape — proper joins + round end caps
+                        painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                            points: pts,
+                            closed: false,
+                            fill: egui::Color32::TRANSPARENT,
+                            stroke: egui::epaint::PathStroke::new(pw, col),
+                        }));
                     }
                 }
             }
