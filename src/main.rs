@@ -1626,7 +1626,8 @@ fn show_footprint_preview(
 
     // Draw pads — copper colored with rotation support
     let copper     = egui::Color32::from_rgb(185, 140, 10);
-    let drill_bg   = egui::Color32::from_rgb(20, 50, 22);
+    let drill_bg   = egui::Color32::from_rgb(50, 35, 15);   // FR4 brown — distinct from PCB green
+    let drill_ring = egui::Color32::from_rgb(90, 65, 25);
     let num_col    = egui::Color32::from_rgb(30, 20, 0);
     let font_sz    = (scale * 0.7).clamp(7.0, 12.0);
     // Thin dark border makes close-pitch pads visually distinct
@@ -1638,7 +1639,7 @@ fn show_footprint_preview(
             let r = pad.drill * 0.5 * scale;
             let pcx = ts(pad.cx, pad.cy);
             painter.circle_filled(pcx, r, drill_bg);
-            painter.circle_stroke(pcx, r, egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 60, 0)));
+            painter.circle_stroke(pcx, r, egui::Stroke::new(1.0, drill_ring));
             continue;
         }
 
@@ -1713,7 +1714,7 @@ fn show_footprint_preview(
         if pad.drill > 0.0 {
             // Hole radius in mm
             let hr = pad.drill * 0.5;
-            let ring_col = egui::Color32::from_rgb(80, 60, 0);
+            let ring_col = drill_ring;
             // Compute oval slot hole half-dimensions
             let is_slot = pad.drill_slot > pad.drill + 0.05
                        || (pad.shape == "oval" && (hw - hh).abs() > 0.05);
