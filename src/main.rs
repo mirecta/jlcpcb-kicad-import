@@ -380,10 +380,13 @@ impl eframe::App for App {
                     };
                     self.state.ref_pos = [0.0, body_max_y + 2.54];
                     self.state.val_pos = [0.0, body_min_y - 2.54];
-                    // Init 3D model placement. Bake EasyEDA c_rotation into the mesh so the
-                    // viewer starts at 0,0,0 (matching KiCad's STEP display at 0,0,0 rotation).
-                    self.state.model_offset   = [0.0; 3];
-                    self.state.model_rotation = [0.0; 3];
+                    // Init 3D model placement from EasyEDA c_origin / c_rotation so the
+                    // viewer starts at the same position as KiCad's 3D viewer.
+                    // model_rotation is stored in viewer convention (negated vs KiCad) — see
+                    // build_model_mat; export.rs negates back to KiCad convention on export.
+                    self.state.model_offset   = comp.model_init_offset;
+                    let ir = comp.model_init_rotation;
+                    self.state.model_rotation = [-ir[0], -ir[1], -ir[2]];
                     self.state.model_scale    = [1.0, 1.0, 1.0];
                     self.state.model_viewer.reset_view();
                     let pads: Vec<model3d::PadInfo> = comp.pads.iter()
