@@ -98,6 +98,15 @@ impl PanZoom {
     fn reset(&mut self) { *self = Self::default(); }
 }
 
+#[derive(Clone, Copy)]
+struct RefreshOptions {
+    symbols:          bool,
+    keep_sym_labels:  bool,
+    footprints:       bool,
+    models_3d:        bool,
+    keep_3d_settings: bool,
+}
+
 enum BgMsg {
     SearchDone(Vec<SearchResult>),
     SearchErr(String),
@@ -162,6 +171,14 @@ struct AppState {
     // Deferred row click (set inside table closure, handled at top of update)
     pending_select: Option<usize>,
 
+    // Refresh dialog
+    show_refresh_dialog: bool,
+    refresh_symbols:          bool,
+    refresh_keep_sym_labels:  bool,
+    refresh_footprints:       bool,
+    refresh_3d:               bool,
+    refresh_keep_3d_settings: bool,
+
     // Status / loading
     status: String,
     loading: bool,
@@ -195,6 +212,11 @@ impl App {
         state.import_package = true;
         state.hide_pin_numbers = true;
         state.hide_pin_names   = false;
+        state.refresh_symbols          = true;
+        state.refresh_keep_sym_labels  = true;
+        state.refresh_footprints       = true;
+        state.refresh_3d               = true;
+        state.refresh_keep_3d_settings = true;
         App { state }
     }
 
@@ -254,62 +276,72 @@ impl App {
         });
     }
 
-    fn do_refresh_library(&mut self) {
-        let lib_path = self.state.settings.lib_path.clone();
-        let lib_name = self.state.settings.lib_name.clone();
+    fn do_refresh_library(&mut self, opts: RefreshOptions) {
+        let lib_path          = self.state.settings.lib_path.clone();
+        let lib_name          = self.state.settings.lib_name.clone();
+        let hide_pin_numbers  = self.state.hide_pin_numbers;
+        let hide_pin_names    = self.state.hide_pin_names;
         self.state.status = "Starting library refresh...".to_string();
 
         self.spawn(move |tx| {
             use std::fs;
             use std::path::Path;
 
-            let sym_file = Path::new(&lib_path).join(format!("{}.kicad_sym", lib_name));
-
-            if !sym_file.exists() {
-                let _ = tx.send(BgMsg::RefreshErr(format!("Library file not found: {}", sym_file.display())));
-                return;
-            }
-
-            let content = match fs::read_to_string(&sym_file) {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx.send(BgMsg::RefreshErr(format!("Failed to read library: {}", e)));
-                    return;
-                }
-            };
-
-            // Extract all LCSC IDs from the library
-            let lcsc_ids = extract_lcsc_ids(&content);
-            let total = lcsc_ids.len();
-
-            if total == 0 {
-                let _ = tx.send(BgMsg::RefreshErr("No components with LCSC IDs found".to_string()));
-                return;
-            }
-
-            let mut updated_content = content.clone();
             let mut updated_count = 0;
             let mut failed_count = 0;
 
-            for (i, lcsc_id) in lcsc_ids.iter().enumerate() {
-                let _ = tx.send(BgMsg::RefreshProgress(i + 1, total));
+            if opts.symbols {
+                let sym_file = Path::new(&lib_path).join(format!("{}.kicad_sym", lib_name));
 
-                match api::fetch_component(lcsc_id) {
-                    Ok(comp) => {
-                        updated_content = update_component_in_lib(&updated_content, lcsc_id, &comp);
-                        updated_count += 1;
+                if !sym_file.exists() {
+                    let _ = tx.send(BgMsg::RefreshErr(format!("Library file not found: {}", sym_file.display())));
+                    return;
+                }
+
+                let content = match fs::read_to_string(&sym_file) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(BgMsg::RefreshErr(format!("Failed to read library: {}", e)));
+                        return;
                     }
-                    Err(_) => {
-                        failed_count += 1;
+                };
+
+                let lcsc_ids = extract_lcsc_ids(&content);
+                let total = lcsc_ids.len();
+
+                if total == 0 {
+                    let _ = tx.send(BgMsg::RefreshErr("No components with LCSC IDs found".to_string()));
+                    return;
+                }
+
+                let mut updated_content = content.clone();
+
+                for (i, lcsc_id) in lcsc_ids.iter().enumerate() {
+                    let _ = tx.send(BgMsg::RefreshProgress(i + 1, total));
+
+                    match api::fetch_component(lcsc_id) {
+                        Ok(comp) => {
+                            updated_content = update_component_in_lib(
+                                &updated_content, lcsc_id, &comp,
+                                opts.keep_sym_labels, &lib_name,
+                                hide_pin_numbers, hide_pin_names,
+                            );
+                            updated_count += 1;
+                        }
+                        Err(_) => {
+                            failed_count += 1;
+                        }
                     }
+                }
+
+                if let Err(e) = fs::write(&sym_file, updated_content) {
+                    let _ = tx.send(BgMsg::RefreshErr(format!("Failed to write library: {}", e)));
+                    return;
                 }
             }
 
-            // Write back the updated library
-            if let Err(e) = fs::write(&sym_file, updated_content) {
-                let _ = tx.send(BgMsg::RefreshErr(format!("Failed to write library: {}", e)));
-                return;
-            }
+            // Footprints and 3D model refresh: placeholders for future implementation
+            // opts.footprints / opts.models_3d / opts.keep_3d_settings
 
             let _ = tx.send(BgMsg::RefreshDone(updated_count, failed_count));
         });
@@ -490,6 +522,59 @@ impl eframe::App for App {
                 });
         }
 
+        // Refresh Library dialog
+        if self.state.show_refresh_dialog {
+            let mut open = true;
+            egui::Window::new("Refresh Library")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut self.state.refresh_symbols, "Refresh symbols");
+                    ui.indent("sym_opts", |ui| {
+                        ui.add_enabled(
+                            self.state.refresh_symbols,
+                            egui::Checkbox::new(&mut self.state.refresh_keep_sym_labels, "Keep symbol label positions"),
+                        );
+                    });
+                    ui.add_space(6.0);
+                    ui.checkbox(&mut self.state.refresh_footprints, "Refresh footprints");
+                    ui.add_space(6.0);
+                    ui.checkbox(&mut self.state.refresh_3d, "Refresh 3D models");
+                    ui.indent("d3_opts", |ui| {
+                        ui.add_enabled(
+                            self.state.refresh_3d,
+                            egui::Checkbox::new(&mut self.state.refresh_keep_3d_settings, "Keep 3D model settings"),
+                        );
+                    });
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let nothing_selected = !self.state.refresh_symbols
+                            && !self.state.refresh_footprints
+                            && !self.state.refresh_3d;
+                        if ui.add_enabled(!nothing_selected, egui::Button::new("Refresh")).clicked() {
+                            let opts = RefreshOptions {
+                                symbols:          self.state.refresh_symbols,
+                                keep_sym_labels:  self.state.refresh_keep_sym_labels,
+                                footprints:       self.state.refresh_footprints,
+                                models_3d:        self.state.refresh_3d,
+                                keep_3d_settings: self.state.refresh_keep_3d_settings,
+                            };
+                            self.state.show_refresh_dialog = false;
+                            self.do_refresh_library(opts);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.state.show_refresh_dialog = false;
+                        }
+                    });
+                });
+            if !open {
+                self.state.show_refresh_dialog = false;
+            }
+        }
+
         // Top bar
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -584,7 +669,7 @@ impl eframe::App for App {
                         self.state.show_settings = true;
                     }
                     if ui.add_enabled(!self.state.loading, egui::Button::new("🔄 Refresh Library")).clicked() {
-                        self.do_refresh_library();
+                        self.state.show_refresh_dialog = true;
                     }
                 });
             });
@@ -1935,85 +2020,27 @@ fn extract_lcsc_ids(content: &str) -> Vec<String> {
     ids
 }
 
-fn update_component_in_lib(content: &str, lcsc_id: &str, comp: &Component) -> String {
-    // Find the symbol containing this LCSC ID and update its Stock and Price properties
-    let mut result = String::new();
-    let mut in_target_symbol = false;
-    let mut in_property = false;
-    let mut skip_until_paren_close = false;
-    let mut paren_depth = 0;
+fn update_component_in_lib(
+    content: &str,
+    lcsc_id: &str,
+    comp: &Component,
+    keep_labels: bool,
+    lib_name: &str,
+    hide_pin_numbers: bool,
+    hide_pin_names: bool,
+) -> String {
+    let name = export::sanitize_name(&comp.value);
 
-    for line in content.lines() {
-        // Check if we found the LCSC property with our ID
-        if line.contains(&format!("(property \"LCSC\" \"{}\"", lcsc_id)) {
-            in_target_symbol = true;
-        }
+    // Extract existing label positions before rebuilding if requested
+    let (ref_pos, val_pos) = if keep_labels {
+        export::extract_label_positions(content, lcsc_id)
+            .unwrap_or(([0.0, 2.54], [0.0, -2.54]))
+    } else {
+        ([0.0, 2.54], [0.0, -2.54])
+    };
 
-        // If we're in the target symbol and found Stock or Price property, replace it
-        if in_target_symbol && !skip_until_paren_close {
-            if line.contains("(property \"Stock\" \"") {
-                // Get the indentation
-                let indent = line.chars().take_while(|c| c.is_whitespace()).collect::<String>();
-                // Write new stock property value (just update the value line)
-                let new_line = line.replace(
-                    &format!("(property \"Stock\" \""),
-                    &format!("(property \"Stock\" \"{}", comp.stock).as_str()
-                ).split('"').take(3).collect::<Vec<_>>().join("\"") + "\"";
-                result.push_str(&new_line);
-                result.push('\n');
-                skip_until_paren_close = true;
-                paren_depth = 1;
-                continue;
-            } else if line.contains("(property \"Price\" \"") {
-                // Get the indentation
-                let indent = line.chars().take_while(|c| c.is_whitespace()).collect::<String>();
-                // Write new price property value (just update the value line)
-                let new_line = line.replace(
-                    &format!("(property \"Price\" \""),
-                    &format!("(property \"Price\" \"{}", comp.price).as_str()
-                ).split('"').take(3).collect::<Vec<_>>().join("\"") + "\"";
-                result.push_str(&new_line);
-                result.push('\n');
-                skip_until_paren_close = true;
-                paren_depth = 1;
-                continue;
-            }
-        }
-
-        // If we're skipping lines in a property, track parens to know when to stop
-        if skip_until_paren_close {
-            for ch in line.chars() {
-                match ch {
-                    '(' => paren_depth += 1,
-                    ')' => {
-                        paren_depth -= 1;
-                        if paren_depth == 0 {
-                            skip_until_paren_close = false;
-                            result.push_str(line);
-                            result.push('\n');
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if skip_until_paren_close {
-                continue; // Skip this line, still inside the property
-            } else {
-                continue; // We just wrote the closing line
-            }
-        }
-
-        result.push_str(line);
-        result.push('\n');
-
-        // Check if we're exiting the symbol
-        if in_target_symbol && line.trim() == ")" && line.len() <= 4 {
-            in_target_symbol = false;
-        }
-    }
-
-    result
+    let new_sym = export::build_symbol(comp, lib_name, ref_pos, val_pos, hide_pin_numbers, hide_pin_names);
+    export::replace_symbol_in_lib(content, &name, &new_sym)
 }
 
 

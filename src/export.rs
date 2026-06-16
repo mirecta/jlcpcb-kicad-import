@@ -165,7 +165,7 @@ pub fn ref_letter(category: &str) -> &'static str {
     "U"
 }
 
-fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32; 2], hide_pin_numbers: bool, hide_pin_names: bool) -> String {
+pub fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32; 2], hide_pin_numbers: bool, hide_pin_names: bool) -> String {
     let name = sanitize_name(&c.value);
     let footprint_ref = format!("{}:{}", lib_name, package_name(c));
 
@@ -500,7 +500,7 @@ fn esc_pad(s: &str) -> String {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn replace_symbol_in_lib(lib: &str, name: &str, new_sym: &str) -> String {
+pub fn replace_symbol_in_lib(lib: &str, name: &str, new_sym: &str) -> String {
     // Search without leading-whitespace assumption so both tab and space indent work
     let search = format!(r#"(symbol "{}""#, name);
     if let Some(sym_offset) = lib.find(&search) {
@@ -525,6 +525,44 @@ fn replace_symbol_in_lib(lib: &str, name: &str, new_sym: &str) -> String {
     } else {
         lib.to_string()
     }
+}
+
+/// Extract (ref_pos, val_pos) from an existing .kicad_sym library string for a given LCSC ID.
+/// Returns None if the symbol or positions can't be found.
+pub fn extract_label_positions(lib: &str, lcsc_id: &str) -> Option<([f32;2],[f32;2])> {
+    // Find the symbol block that contains this LCSC ID
+    let lcsc_marker = format!("(property \"LCSC\" \"{}\"", lcsc_id);
+    let lcsc_pos = lib.find(&lcsc_marker)?;
+    // Walk back to the start of the enclosing symbol block
+    let before = &lib[..lcsc_pos];
+    let sym_start = before.rfind("(symbol \"")?;
+    // Find the end of this symbol block by paren matching
+    let tail = &lib[sym_start..];
+    let mut depth = 0usize;
+    let mut sym_end = sym_start;
+    for (i, ch) in tail.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => { depth -= 1; if depth == 0 { sym_end = sym_start + i + 1; break; } }
+            _ => {}
+        }
+    }
+    let sym_block = &lib[sym_start..sym_end];
+
+    let parse_at = |prop: &str| -> Option<[f32;2]> {
+        let marker = format!("(property \"{}\"", prop);
+        let p = sym_block.find(&marker)?;
+        let at_p = sym_block[p..].find("(at ")?;
+        let after = &sym_block[p + at_p + 4..];
+        let end = after.find(')')?;
+        let nums: Vec<f32> = after[..end].split_whitespace()
+            .filter_map(|s| s.parse().ok()).collect();
+        if nums.len() >= 2 { Some([nums[0], nums[1]]) } else { None }
+    };
+
+    let ref_pos = parse_at("Reference")?;
+    let val_pos = parse_at("Value")?;
+    Some((ref_pos, val_pos))
 }
 
 pub fn sanitize_name(name: &str) -> String {
