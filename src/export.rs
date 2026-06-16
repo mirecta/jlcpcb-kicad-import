@@ -399,9 +399,11 @@ fn build_footprint(
                 let pts_str: String = pts.iter()
                     .map(|p| format!(" (xy {:.4} {:.4})", p[0], p[1]))
                     .collect::<Vec<_>>().join("");
-                let fill_str = if *fill { "solid" } else { "none" };
+                // Only copper layers need explicit (fill solid); paste/fab/comments/courtyard
+                // use KiCad's layer-default behavior — omitting fill matches JLC2KiCadLib output
+                let fill_part = if *fill { " (fill solid)" } else { "" };
                 graphics.push_str(&format!(
-                    "  (fp_poly (pts{pts_str}) (layer \"{layer}\") (width {width:.4}) (fill {fill_str}))\n"
+                    "  (fp_poly (pts{pts_str}) (layer \"{layer}\") (width {width:.4}){fill_part})\n"
                 ));
             }
             FpGraphic::Arc { start, mid, end, width, layer } => {
@@ -424,6 +426,8 @@ fn build_footprint(
     (effects (font (size 1 1) (thickness 0.15))))
   (property "LCSC" "{lcsc}" (at 0 0 0) (layer "F.Fab") (hide yes)
     (effects (font (size 1.27 1.27))))
+  (fp_text user "${{REFERENCE}}" (at 0 0) (layer "F.Fab")
+    (effects (font (size 1 1) (thickness 0.15))))
 {pads}{graphics}  (model "{model}"
     (offset (xyz {ox} {oy} {oz}))
     (scale (xyz {sx} {sy} {sz}))

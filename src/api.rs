@@ -884,8 +884,16 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
 
     if raw.is_empty() { return vec![]; }
 
-    let cx0 = raw.iter().map(|(x, ..)| *x).sum::<f32>() / raw.len() as f32;
-    let cy0 = raw.iter().map(|(_, y, ..)| *y).sum::<f32>() / raw.len() as f32;
+    // Use head.x/y as origin to match JLC2KiCadLib coordinate system.
+    // Fall back to pad centroid only if head data is unavailable.
+    let (hx, hy) = head_origin(pd);
+    let (cx0, cy0) = if hx != 0.0 || hy != 0.0 {
+        (hx, hy)
+    } else {
+        let cx0 = raw.iter().map(|(x, ..)| *x).sum::<f32>() / raw.len() as f32;
+        let cy0 = raw.iter().map(|(_, y, ..)| *y).sum::<f32>() / raw.len() as f32;
+        (cx0, cy0)
+    };
 
     raw.into_iter().map(|(cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee, slot_length_ee, poly_pts_ee)| {
         let fallback = w.min(h) * SCALE * 0.5;
@@ -962,11 +970,34 @@ fn ee_layer_to_kicad(layer: i32) -> Option<&'static str> {
         12         => Some("F.Fab"),
         13         => Some("F.CrtYd"),
         14         => Some("B.CrtYd"),
-        99|100|101 => Some("Cmts.User"),
+        99|100|101 => Some("User.Comments"),
         _          => None,
     }
 }
 
+/// Return the footprint origin from the head section of a packageDetail value.
+/// This matches what JLC2KiCadLib uses as the coordinate origin and ensures all
+/// pad/graphic coordinates are consistent with the Python library's output.
+fn head_origin(pd: &serde_json::Value) -> (f32, f32) {
+    let ds = match pd.get("dataStr") {
+        Some(v) => v,
+        None => return (0.0, 0.0),
+    };
+    let parsed: serde_json::Value = if ds.is_string() {
+        match serde_json::from_str(ds.as_str().unwrap_or("")) {
+            Ok(v) => v,
+            Err(_) => return (0.0, 0.0),
+        }
+    } else {
+        ds.clone()
+    };
+    let x = parsed.pointer("/head/x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let y = parsed.pointer("/head/y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    if x == 0.0 && y == 0.0 { return (0.0, 0.0); }
+    (x, y)
+}
+
+#[allow(dead_code)]
 fn pad_centroid(shapes: &[serde_json::Value]) -> (f32, f32) {
     let mut xs: Vec<f32> = Vec::new();
     let mut ys: Vec<f32> = Vec::new();
@@ -1107,7 +1138,10 @@ fn extract_fp_graphics(easyeda: &serde_json::Value) -> Vec<FpGraphic> {
     if shapes.is_empty() { return vec![]; }
 
     const SCALE: f32 = 0.254;
-    let (cx0, cy0) = pad_centroid(&shapes);
+    let (cx0, cy0) = {
+        let (hx, hy) = head_origin(pd);
+        if hx != 0.0 || hy != 0.0 { (hx, hy) } else { pad_centroid(&shapes) }
+    };
     let to_mm = |ex: f32, ey: f32| -> (f32, f32) {
         ((ex - cx0) * SCALE, (ey - cy0) * SCALE)
     };
@@ -1184,7 +1218,9 @@ fn extract_fp_graphics(easyeda: &serde_json::Value) -> Vec<FpGraphic> {
                     .collect()
             };
             if pts.len() < 3 { continue; }
-            let fill  = layer != "F.CrtYd" && layer != "B.CrtYd" && layer != "Edge.Cuts";
+            // Only copper SOLIDREGIONs need explicit fill; paste/fab/comments/courtyard
+            // use KiCad's layer-default fill behavior (matches JLC2KiCadLib behaviour)
+            let fill  = layer == "F.Cu" || layer == "B.Cu";
             let width = if layer == "F.CrtYd" || layer == "B.CrtYd" { 0.05 } else { 0.12 };
             out.push(FpGraphic::Poly { pts, width, layer, fill });
 
@@ -1204,7 +1240,10 @@ fn extract_fp_drawings(easyeda: &serde_json::Value) -> Vec<FpDrawing> {
     // EasyEDA footprint units: 1 unit = 10 mil = 0.254 mm
     const SCALE: f32 = 0.254;
 
-    let (cx0, cy0) = pad_centroid(&shapes);
+    let (cx0, cy0) = {
+        let (hx, hy) = head_origin(pd);
+        if hx != 0.0 || hy != 0.0 { (hx, hy) } else { pad_centroid(&shapes) }
+    };
 
     let mut drawings: Vec<FpDrawing> = Vec::new();
 
