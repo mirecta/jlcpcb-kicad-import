@@ -1455,6 +1455,45 @@ fn show_symbol_preview(
     }
 }
 
+// Group line segments that share endpoints into polylines.
+// Returns list of point chains; closed = first ≈ last point.
+fn chain_line_segs(segs: &[(f32, f32, f32, f32)]) -> Vec<Vec<(f32, f32)>> {
+    let eps = 0.001_f32; // 1 µm
+    let n = segs.len();
+    let mut used = vec![false; n];
+    let mut chains: Vec<Vec<(f32, f32)>> = Vec::new();
+    for start in 0..n {
+        if used[start] { continue; }
+        used[start] = true;
+        let (x1, y1, x2, y2) = segs[start];
+        let mut chain = vec![(x1, y1), (x2, y2)];
+        // Extend forward from last point
+        'fwd: loop {
+            let (lx, ly) = *chain.last().unwrap();
+            for i in 0..n {
+                if used[i] { continue; }
+                let (ax, ay, bx, by) = segs[i];
+                if (ax - lx).hypot(ay - ly) < eps { used[i] = true; chain.push((bx, by)); continue 'fwd; }
+                if (bx - lx).hypot(by - ly) < eps { used[i] = true; chain.push((ax, ay)); continue 'fwd; }
+            }
+            break;
+        }
+        // Extend backward from first point
+        'bwd: loop {
+            let (fx, fy) = chain[0];
+            for i in 0..n {
+                if used[i] { continue; }
+                let (ax, ay, bx, by) = segs[i];
+                if (ax - fx).hypot(ay - fy) < eps { used[i] = true; chain.insert(0, (bx, by)); continue 'bwd; }
+                if (bx - fx).hypot(by - fy) < eps { used[i] = true; chain.insert(0, (ax, ay)); continue 'bwd; }
+            }
+            break;
+        }
+        chains.push(chain);
+    }
+    chains
+}
+
 fn show_footprint_preview(
     ui: &mut egui::Ui,
     pads: &[api::Pad],
@@ -1544,6 +1583,40 @@ fn show_footprint_preview(
     // Draw graphics: back layers first, silkscreen on top
     for pass in &["Edge.Cuts", "Cmts.User", "B.Cu", "F.Cu",
                   "B.Fab", "F.Fab", "B.CrtYd", "F.CrtYd", "B.SilkS", "F.SilkS"] {
+        let col = layer_color(pass);
+
+        // --- Lines: group connected segments into polylines for proper joins ---
+        // Collect all lines on this layer, keyed by width bucket
+        let mut width_groups: std::collections::HashMap<u32, Vec<(f32,f32,f32,f32)>> =
+            std::collections::HashMap::new();
+        for g in graphics.iter() {
+            if let api::FpGraphic::Line { x1, y1, x2, y2, layer, width } = g {
+                if layer.as_str() == *pass {
+                    let wk = (width * 1000.0) as u32;
+                    width_groups.entry(wk).or_default().push((*x1, *y1, *x2, *y2));
+                }
+            }
+        }
+        for (wk, segs) in &width_groups {
+            let pw = (*wk as f32 / 1000.0 * scale).max(1.0);
+            let stroke = egui::epaint::PathStroke::new(pw, col);
+            for chain in chain_line_segs(segs) {
+                let pts: Vec<egui::Pos2> = chain.iter().map(|&(x, y)| ts(x, y)).collect();
+                if pts.len() < 2 { continue; }
+                let closed = {
+                    let f = pts[0]; let l = *pts.last().unwrap();
+                    (f.x - l.x).hypot(f.y - l.y) < 2.0
+                };
+                painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                    points: pts,
+                    closed,
+                    fill: egui::Color32::TRANSPARENT,
+                    stroke: stroke.clone(),
+                }));
+            }
+        }
+
+        // --- Non-line graphics ---
         for g in graphics {
             let (g_layer, g_width) = match g {
                 api::FpGraphic::Line  { layer, width, .. } => (layer.as_str(), *width),
@@ -1552,34 +1625,10 @@ fn show_footprint_preview(
                 api::FpGraphic::Arc   { layer, width, .. } => (layer.as_str(), *width),
             };
             if g_layer != *pass { continue; }
-            let col = layer_color(g_layer);
+            if matches!(g, api::FpGraphic::Line { .. }) { continue; } // already drawn above
             let pw  = (g_width * scale).max(1.0);
             match g {
-                api::FpGraphic::Line { x1, y1, x2, y2, .. } => {
-                    // Draw as capsule (rect + round caps) so adjacent segments' caps
-                    // fill corner gaps instead of leaving rectangular notches
-                    let p1 = ts(*x1, *y1);
-                    let p2 = ts(*x2, *y2);
-                    let r = pw * 0.5;
-                    let dx = p2.x - p1.x;
-                    let dy = p2.y - p1.y;
-                    let len = (dx*dx + dy*dy).sqrt();
-                    if len < 0.001 {
-                        painter.circle_filled(p1, r, col);
-                    } else {
-                        let nx = -dy / len * r;
-                        let ny =  dx / len * r;
-                        let poly = vec![
-                            egui::pos2(p1.x + nx, p1.y + ny),
-                            egui::pos2(p2.x + nx, p2.y + ny),
-                            egui::pos2(p2.x - nx, p2.y - ny),
-                            egui::pos2(p1.x - nx, p1.y - ny),
-                        ];
-                        painter.add(egui::Shape::convex_polygon(poly, col, egui::Stroke::NONE));
-                        painter.circle_filled(p1, r, col);
-                        painter.circle_filled(p2, r, col);
-                    }
-                }
+                api::FpGraphic::Line { .. } => { /* handled above */ }
                 api::FpGraphic::Circle { cx, cy, r, .. } => {
                     painter.circle_stroke(ts(*cx, *cy), r * scale, egui::Stroke::new(pw, col));
                 }
