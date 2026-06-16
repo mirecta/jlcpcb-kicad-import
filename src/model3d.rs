@@ -48,8 +48,9 @@ pub struct PadInfo {
     pub w:  f32,
     pub h:  f32,
     pub shape: String,  // "circle", "rect", "oval", "polygon"
-    pub drill: f32,     // 0 = SMD; >0 = through-hole drill diameter in mm
-    pub rotation: f32,  // rotation in degrees
+    pub drill:      f32,  // 0 = SMD; >0 = drill diameter (or slot minor axis) in mm
+    pub drill_slot: f32,  // >0 = slot major axis in mm (oval slot); 0 = circular drill
+    pub rotation: f32,    // rotation in degrees
     pub poly_pts: Vec<[f32; 2]>,  // polygon vertices in mm (shape="polygon" only)
 }
 
@@ -353,7 +354,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, rotation: p.rotation, poly_pts: p.poly_pts.clone() })
+                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, drill_slot: p.drill_slot, rotation: p.rotation, poly_pts: p.poly_pts.clone() })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -375,7 +376,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, rotation: p.rotation, poly_pts: p.poly_pts.clone() })
+                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, drill_slot: p.drill_slot, rotation: p.rotation, poly_pts: p.poly_pts.clone() })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -597,31 +598,35 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
     let mut v: Vec<f32> = Vec::new();
 
     // Collect drill/slot holes for surface tessellation
-    let mut holes: Vec<(f32, f32, f32)> = Vec::new();
+    // Each hole: (cx, cy, half_ax, half_ay, r)
+    // Circular: half_ax=0, half_ay=0, r=drill_radius
+    // Slot: half_ax/ay = half of the slot axis vector, r = slot minor radius
+    let mut holes: Vec<(f32, f32, f32, f32, f32)> = Vec::new();
     for pad in pads.iter().filter(|p| p.drill > 0.0) {
-        let dr = pad.drill * 0.5;
+        let r = pad.drill * 0.5;
         let hw = pad.w * 0.5;
         let hh = pad.h * 0.5;
-        if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
-            // Oval milled slot: tessellate surface with two end circles
-            let (hole_hw, hole_hh) = if hw <= hh {
-                (dr, (dr * hh / hw).max(dr))
+        let rad = pad.rotation.to_radians();
+        let (rs, rc) = (rad.sin(), rad.cos());
+
+        // Determine slot extent from explicit drill_slot, or derive from pad aspect ratio
+        let slot_major = if pad.drill_slot > 0.0 {
+            pad.drill_slot
+        } else if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
+            if hw >= hh { pad.w } else { pad.h }
+        } else { 0.0 };
+
+        if slot_major > pad.drill + 0.01 {
+            // Oval slot: half-axis vector along pad's major axis
+            let half_ext = (slot_major - pad.drill) * 0.5;
+            let (ax, ay) = if hw >= hh {
+                (half_ext * rc, half_ext * rs)
             } else {
-                ((dr * hw / hh).max(dr), dr)
+                (-half_ext * rs, half_ext * rc)
             };
-            let rad = pad.rotation.to_radians();
-            let (rs, rc) = (rad.sin(), rad.cos());
-            if hw <= hh {
-                let ext = hole_hh - hole_hw;
-                holes.push((pad.cx + ext * rs, pad.cy - ext * rc, hole_hw));
-                holes.push((pad.cx - ext * rs, pad.cy + ext * rc, hole_hw));
-            } else {
-                let ext = hole_hw - hole_hh;
-                holes.push((pad.cx + ext * rc, pad.cy + ext * rs, hole_hh));
-                holes.push((pad.cx - ext * rc, pad.cy - ext * rs, hole_hh));
-            }
+            holes.push((pad.cx, pad.cy, ax, ay, r));
         } else {
-            holes.push((pad.cx, pad.cy, dr));
+            holes.push((pad.cx, pad.cy, 0.0, 0.0, r));
         }
     }
 
@@ -863,22 +868,29 @@ fn cylinder_hole(v: &mut Vec<f32>, cx: f32, cy: f32, r: f32, z_top: f32, z_bot: 
     }
 }
 
-// PCB surface quad in XY plane with circular drill holes cut out (grid tessellation)
-fn quad_y_holed(v: &mut Vec<f32>, half: f32, holes: &[(f32, f32, f32)], z: f32, c: [f32; 3]) {
+// PCB surface quad with drill holes/slots cut out (grid tessellation).
+// holes: (cx, cy, half_ax, half_ay, r) — circular when ax=ay=0, slot otherwise.
+fn quad_y_holed(v: &mut Vec<f32>, half: f32, holes: &[(f32, f32, f32, f32, f32)], z: f32, c: [f32; 3]) {
     const N: i32 = 96;
     let step = (2.0 * half) / N as f32;
-    let nrm: [f32; 3] = [0.0, 0.0, if z >= 0.0 { 1.0 } else { -1.0 }];  // Z-up/down normal
+    let nrm: [f32; 3] = [0.0, 0.0, if z >= 0.0 { 1.0 } else { -1.0 }];
     for i in 0..N {
         for j in 0..N {
             let x0 = -half + i as f32 * step;
             let x1 = x0 + step;
             let y0 = -half + j as f32 * step;
             let y1 = y0 + step;
-            let cx = (x0 + x1) * 0.5;
-            let cy = (y0 + y1) * 0.5;
-            let in_hole = holes.iter().any(|(hx, hy, hr)| {
-                let dx = cx - hx; let dy = cy - hy;
-                dx * dx + dy * dy < hr * hr
+            let px = (x0 + x1) * 0.5;
+            let py = (y0 + y1) * 0.5;
+            let in_hole = holes.iter().any(|&(hx, hy, ax, ay, r)| {
+                // Point-to-line-segment distance (segment from centre-axis to centre+axis)
+                let ex = px - hx; let ey = py - hy;
+                let len2 = ax * ax + ay * ay;
+                let t = if len2 > 1e-10 {
+                    ((ex * ax + ey * ay) / len2).clamp(-1.0, 1.0)
+                } else { 0.0 };
+                let qx = ex - t * ax; let qy = ey - t * ay;
+                qx * qx + qy * qy < r * r
             });
             if in_hole { continue; }
             let pts = [[x0,y0,z],[x1,y0,z],[x1,y1,z],[x0,y1,z]];

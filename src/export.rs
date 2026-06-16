@@ -328,14 +328,16 @@ fn build_footprint(
         if pad.drill > 0.0 {
             let hw = pad.w * 0.5;
             let hh = pad.h * 0.5;
-            let drill_field = if pad.shape == "oval" && (hw - hh).abs() > 0.01 {
-                // Oval slot: milled, not drilled — KiCad uses (drill oval slot_w slot_h)
+            let drill_field = if pad.drill_slot > 0.0 {
+                // Actual slot dimensions from EasyEDA data
+                let minor = pad.drill;
+                let major = pad.drill_slot;
+                let (sw, sh) = if hw >= hh { (major, minor) } else { (minor, major) };
+                format!("oval {:.4} {:.4}", sw, sh)
+            } else if pad.shape == "oval" && (hw - hh).abs() > 0.01 {
+                // Derive slot from pad aspect ratio when no explicit slot data
                 let slot_minor = pad.drill;
-                let slot_major = if hw <= hh {
-                    pad.drill * hh / hw
-                } else {
-                    pad.drill * hw / hh
-                };
+                let slot_major = if hw <= hh { pad.drill * hh / hw } else { pad.drill * hw / hh };
                 let (sw, sh) = if hw <= hh { (slot_minor, slot_major) } else { (slot_major, slot_minor) };
                 format!("oval {:.4} {:.4}", sw, sh)
             } else {
@@ -391,6 +393,12 @@ fn build_footprint(
                 let fill_str = if *fill { "solid" } else { "none" };
                 graphics.push_str(&format!(
                     "  (fp_poly (pts{pts_str}) (layer \"{layer}\") (width {width:.4}) (fill {fill_str}))\n"
+                ));
+            }
+            FpGraphic::Arc { start, mid, end, width, layer } => {
+                graphics.push_str(&format!(
+                    "  (fp_arc (start {:.4} {:.4}) (mid {:.4} {:.4}) (end {:.4} {:.4}) (layer \"{layer}\") (width {width:.4}))\n",
+                    start[0], start[1], mid[0], mid[1], end[0], end[1]
                 ));
             }
         }

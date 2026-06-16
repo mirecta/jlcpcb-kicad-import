@@ -392,6 +392,7 @@ impl eframe::App for App {
                                 w: p.w, h: p.h,
                                 shape: p.shape.clone(),
                                 drill: p.drill,
+                                drill_slot: p.drill_slot,
                                 rotation: p.rotation,
                                 poly_pts: p.poly_pts.clone(),
                             }
@@ -963,6 +964,7 @@ impl eframe::App for App {
                                                     w: p.w, h: p.h,
                                                     shape: p.shape.clone(),
                                                     drill: p.drill,
+                                                    drill_slot: p.drill_slot,
                                                     rotation: p.rotation,
                                                     poly_pts: p.poly_pts.clone(),
                                                 }
@@ -1500,6 +1502,11 @@ fn show_footprint_preview(
             api::FpGraphic::Poly { pts, .. } => {
                 for p in pts { expand(p[0], p[1], 0.0); }
             }
+            api::FpGraphic::Arc { start, mid, end, .. } => {
+                expand(start[0], start[1], 0.0);
+                expand(mid[0],   mid[1],   0.0);
+                expand(end[0],   end[1],   0.0);
+            }
         }
     }
     if min_x > max_x { min_x = -5.0; max_x = 5.0; min_y = -5.0; max_y = 5.0; }
@@ -1525,17 +1532,22 @@ fn show_footprint_preview(
             "F.SilkS" | "B.SilkS" => egui::Color32::from_rgb(200, 200, 200),
             "F.CrtYd" | "B.CrtYd" => egui::Color32::from_rgb(255, 210, 0),
             "F.Fab"   | "B.Fab"   => egui::Color32::from_rgb(120, 90, 40),
+            "F.Cu"    | "B.Cu"    => egui::Color32::from_rgb(185, 140, 10),
+            "Edge.Cuts"           => egui::Color32::from_rgb(255, 255, 0),
+            "Cmts.User"           => egui::Color32::from_rgb(100, 120, 160),
             _ => egui::Color32::from_gray(90),
         }
     };
 
-    // Draw graphics: courtyard/fab first, silkscreen on top
-    for pass in &["F.Fab", "B.Fab", "F.CrtYd", "B.CrtYd", "F.SilkS", "B.SilkS"] {
+    // Draw graphics: back layers first, silkscreen on top
+    for pass in &["Edge.Cuts", "Cmts.User", "B.Cu", "F.Cu",
+                  "B.Fab", "F.Fab", "B.CrtYd", "F.CrtYd", "B.SilkS", "F.SilkS"] {
         for g in graphics {
             let (g_layer, g_width) = match g {
                 api::FpGraphic::Line  { layer, width, .. } => (layer.as_str(), *width),
                 api::FpGraphic::Circle{ layer, width, .. } => (layer.as_str(), *width),
                 api::FpGraphic::Poly  { layer, width, .. } => (layer.as_str(), *width),
+                api::FpGraphic::Arc   { layer, width, .. } => (layer.as_str(), *width),
             };
             if g_layer != *pass { continue; }
             let col = layer_color(g_layer);
@@ -1550,14 +1562,30 @@ fn show_footprint_preview(
                 api::FpGraphic::Poly { pts, fill, .. } => {
                     if pts.len() >= 2 {
                         let spts: Vec<egui::Pos2> = pts.iter().map(|p| ts(p[0], p[1])).collect();
+                        let fill_col = if *fill {
+                            let c = col.to_array();
+                            egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 60)
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
                         painter.add(egui::Shape::Path(egui::epaint::PathShape {
                             points: spts,
                             closed: true,
-                            fill: egui::Color32::TRANSPARENT,
+                            fill: fill_col,
                             stroke: egui::epaint::PathStroke::new(pw, col),
                         }));
-                        let _ = fill;
                     }
+                }
+                api::FpGraphic::Arc { start, mid, end, .. } => {
+                    // Approximate arc with line segments: start → mid → end
+                    // For a proper arc, compute centre+radius from the 3 points
+                    let s = ts(start[0], start[1]);
+                    let m = ts(mid[0],   mid[1]);
+                    let e = ts(end[0],   end[1]);
+                    // Use quadratic Bezier approximation through start, mid, end
+                    let stroke = egui::Stroke::new(pw, col);
+                    painter.line_segment([s, m], stroke);
+                    painter.line_segment([m, e], stroke);
                 }
             }
         }
@@ -1658,13 +1686,28 @@ fn show_footprint_preview(
             // Hole radius in mm
             let hr = pad.drill * 0.5;
             let ring_col = egui::Color32::from_rgb(80, 60, 0);
-            if pad.shape == "oval" && (hw - hh).abs() > 0.05 {
-                // Oval slot hole: match pad's aspect ratio
-                let (hole_hw, hole_hh) = if hw >= hh {
-                    (hr * hw / hh, hr)
+            // Compute oval slot hole half-dimensions
+            let is_slot = pad.drill_slot > pad.drill + 0.05
+                       || (pad.shape == "oval" && (hw - hh).abs() > 0.05);
+            let (hole_hw_opt, hole_hh_opt) = if is_slot {
+                if pad.drill_slot > pad.drill + 0.05 {
+                    // Explicit slot dimensions
+                    if hw >= hh {
+                        (Some(pad.drill_slot * 0.5), Some(hr))
+                    } else {
+                        (Some(hr), Some(pad.drill_slot * 0.5))
+                    }
                 } else {
-                    (hr, hr * hh / hw)
-                };
+                    // Derive from pad aspect ratio
+                    if hw >= hh {
+                        (Some(hr * hw / hh.max(0.001)), Some(hr))
+                    } else {
+                        (Some(hr), Some(hr * hh / hw.max(0.001)))
+                    }
+                }
+            } else { (None, None) };
+            if let (Some(hole_hw), Some(hole_hh)) = (hole_hw_opt, hole_hh_opt) {
+                // Oval slot hole
                 let draw_oval = |v: &mut dyn FnMut(egui::Shape), col: egui::Color32, hw2: f32, hh2: f32| {
                     let diff2 = hw2 - hh2;
                     if diff2.abs() < 0.01 {

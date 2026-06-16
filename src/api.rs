@@ -41,9 +41,10 @@ pub struct FpDrawing {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum FpGraphic {
-    Line { x1: f32, y1: f32, x2: f32, y2: f32, width: f32, layer: String },
+    Line   { x1: f32, y1: f32, x2: f32, y2: f32, width: f32, layer: String },
     Circle { cx: f32, cy: f32, r: f32, width: f32, layer: String },
-    Poly { pts: Vec<[f32; 2]>, width: f32, layer: String, fill: bool },
+    Poly   { pts: Vec<[f32; 2]>, width: f32, layer: String, fill: bool },
+    Arc    { start: [f32; 2], mid: [f32; 2], end: [f32; 2], width: f32, layer: String },
 }
 
 /// Footprint pad extracted from EasyEDA package shape data
@@ -56,7 +57,8 @@ pub struct Pad {
     pub number: String, // pad number ("1", "2", "A1", …)
     pub shape:  String, // "oval", "rect", "circle", "polygon"
     pub rotation: f32,  // degrees
-    pub drill:  f32,    // 0 = SMD, >0 = through-hole drill diameter in mm
+    pub drill:      f32,  // 0 = SMD, >0 = drill diameter (or slot minor axis) in mm
+    pub drill_slot: f32,  // >0 = oval slot major axis in mm (0 = circular drill)
     pub poly_pts: Vec<[f32; 2]>, // polygon vertices in mm rel. to footprint centre (shape="polygon" only)
 }
 
@@ -803,10 +805,11 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
     // EasyEDA footprint units: 1 unit = 10 mil = 0.254 mm
     const SCALE: f32 = 0.254;
 
-    // (cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee, poly_pts_ee)
-    // hole_r_ee = hole radius in EasyEDA units (p[9]); 0 = SMD
-    // poly_pts_ee = absolute EasyEDA coords of polygon vertices (shape="polygon" only)
-    let mut raw: Vec<(f32, f32, f32, f32, String, String, f32, bool, f32, Vec<[f32; 2]>)> = Vec::new();
+    // (cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee, slot_length_ee, poly_pts_ee)
+    // hole_r_ee      = hole radius in EasyEDA units (p[9]); 0 = SMD
+    // slot_length_ee = distance between slot endpoint centres in EasyEDA units; 0 = circular drill
+    // poly_pts_ee    = absolute EasyEDA coords of polygon vertices (shape="polygon" only)
+    let mut raw: Vec<(f32, f32, f32, f32, String, String, f32, bool, f32, f32, Vec<[f32; 2]>)> = Vec::new();
 
     for shape in &shapes {
         let s = match shape.as_str() {
@@ -831,6 +834,8 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
         let number = p.get(8).copied().unwrap_or("1").to_string();
         // p[9] = hole radius in EasyEDA units (0 = SMD pad)
         let hole_r_ee: f32 = p.get(9).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+        // p[10] = hole points: "0" for round, "x1 y1 x2 y2" for oval/slot (slot endpoints)
+        let hole_pts_str = p.get(10).copied().unwrap_or("0");
         let rotation: f32  = p.get(11).and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
         let is_tht = layer == "11";
@@ -861,7 +866,19 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
             vec![]
         };
 
-        raw.push((cx, cy, w, h, number, kicad_shape.to_string(), rotation, is_tht, hole_r_ee, poly_pts_ee));
+        // Parse slot length from holePoints endpoint pair (p[10] = "x1 y1 x2 y2" for slots)
+        let slot_length_ee: f32 = if is_tht && hole_pts_str != "0" && !hole_pts_str.trim().is_empty() {
+            let coords: Vec<f32> = hole_pts_str.split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if coords.len() >= 4 {
+                let dx = coords[2] - coords[0];
+                let dy = coords[3] - coords[1];
+                (dx * dx + dy * dy).sqrt()
+            } else { 0.0 }
+        } else { 0.0 };
+
+        raw.push((cx, cy, w, h, number, kicad_shape.to_string(), rotation, is_tht, hole_r_ee, slot_length_ee, poly_pts_ee));
     }
 
     if raw.is_empty() { return vec![]; }
@@ -869,7 +886,7 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
     let cx0 = raw.iter().map(|(x, ..)| *x).sum::<f32>() / raw.len() as f32;
     let cy0 = raw.iter().map(|(_, y, ..)| *y).sum::<f32>() / raw.len() as f32;
 
-    raw.into_iter().map(|(cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee, poly_pts_ee)| {
+    raw.into_iter().map(|(cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee, slot_length_ee, poly_pts_ee)| {
         let fallback = w.min(h) * SCALE * 0.5;
         let drill = if is_tht {
             let from_data = hole_r_ee * 2.0 * SCALE;
@@ -878,6 +895,11 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
             } else {
                 fallback
             }
+        } else { 0.0 };
+        // Oval slot major axis: distance between slot endpoint centres + 2 × minor radius
+        let drill_slot = if is_tht && slot_length_ee > 0.0 && hole_r_ee > 0.0 {
+            let major = (slot_length_ee + hole_r_ee * 2.0) * SCALE;
+            if major > drill { major } else { 0.0 }
         } else { 0.0 };
         // Transform polygon vertices to mm relative to footprint centroid
         let poly_pts = poly_pts_ee.into_iter()
@@ -892,6 +914,7 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
             shape,
             rotation,
             drill,
+            drill_slot,
             poly_pts,
         }
     }).collect()
@@ -899,13 +922,20 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
 
 fn ee_layer_to_kicad(layer: i32) -> Option<&'static str> {
     match layer {
-        3  => Some("F.SilkS"),
-        4  => Some("B.SilkS"),
-        10 => Some("F.Fab"),
-        11 => Some("B.Fab"),
-        13 => Some("F.CrtYd"),
-        14 => Some("B.CrtYd"),
-        _  => None,
+        1          => Some("F.Cu"),
+        2          => Some("B.Cu"),
+        3          => Some("F.SilkS"),
+        4          => Some("B.SilkS"),
+        5          => Some("F.Paste"),
+        6          => Some("B.Paste"),
+        7          => Some("F.Mask"),
+        8          => Some("B.Mask"),
+        10         => Some("Edge.Cuts"),
+        12         => Some("F.Fab"),
+        13         => Some("F.CrtYd"),
+        14         => Some("B.CrtYd"),
+        99|100|101 => Some("Cmts.User"),
+        _          => None,
     }
 }
 
@@ -925,6 +955,119 @@ fn pad_centroid(shapes: &[serde_json::Value]) -> (f32, f32) {
     if xs.is_empty() { return (0.0, 0.0); }
     (xs.iter().sum::<f32>() / xs.len() as f32,
      ys.iter().sum::<f32>() / ys.len() as f32)
+}
+
+/// Parse SVG path "M x y A rx ry 0 large sweep x2 y2" into (start, mid, end) in mm.
+/// mid is the point at the half-angle of the arc (required by KiCad fp_arc format).
+fn parse_arc_path(path: &str, cx0: f32, cy0: f32, scale: f32) -> Option<([f32; 2], [f32; 2], [f32; 2])> {
+    // Tokenise: drop command letters, collect all numbers
+    let nums: Vec<f32> = {
+        let mut out = Vec::new();
+        let mut buf = String::new();
+        for ch in path.chars().chain(std::iter::once(' ')) {
+            if ch.is_ascii_alphabetic() {
+                if let Ok(v) = buf.trim().parse::<f32>() { out.push(v); }
+                buf.clear();
+            } else {
+                if ch == ',' { buf.push(' '); } else { buf.push(ch); }
+            }
+        }
+        for tok in buf.split_whitespace() {
+            if let Ok(v) = tok.parse::<f32>() { out.push(v); }
+        }
+        out
+    };
+    // Expect at least 9 numbers: startX startY  rx ry rot largeArc sweep  endX endY
+    if nums.len() < 9 { return None; }
+    let (sx_ee, sy_ee) = (nums[0], nums[1]);
+    let rx = nums[2]; let ry = nums[3];
+    let large_arc = nums[5] != 0.0;
+    let sweep     = nums[6] != 0.0;
+    let (ex_ee, ey_ee) = (nums[7], nums[8]);
+
+    let x1 = (sx_ee - cx0) * scale;
+    let y1 = (sy_ee - cy0) * scale;
+    let x2 = (ex_ee - cx0) * scale;
+    let y2 = (ey_ee - cy0) * scale;
+    let r  = ((rx + ry) * 0.5) * scale;
+
+    // Degenerate: start == end means full circle — represent as circle, skip arc
+    let dx0 = x2 - x1; let dy0 = y2 - y1;
+    if dx0 * dx0 + dy0 * dy0 < 1e-8 { return None; }
+
+    // SVG arc → centre parameterisation (assumes rx == ry, i.e. circular arc)
+    let d = (dx0 * dx0 + dy0 * dy0).sqrt();
+    if d > 2.0 * r + 1e-4 { return None; }
+
+    let mx = (x1 + x2) * 0.5;
+    let my = (y1 + y2) * 0.5;
+    let h  = ((r * r - (d * 0.5) * (d * 0.5)).max(0.0)).sqrt();
+    let px = -dy0 / d;
+    let py =  dx0 / d;
+    let sign: f32 = if large_arc == sweep { 1.0 } else { -1.0 };
+    let (cx, cy) = (mx + sign * h * px, my + sign * h * py);
+
+    let a1 = (y1 - cy).atan2(x1 - cx);
+    let a2 = (y2 - cy).atan2(x2 - cx);
+
+    let mid_a = if sweep {
+        let mut da = a2 - a1;
+        while da < 0.0 { da += std::f32::consts::TAU; }
+        if large_arc && da < std::f32::consts::PI { da += std::f32::consts::TAU; }
+        if !large_arc && da > std::f32::consts::PI { da -= std::f32::consts::TAU; }
+        a1 + da * 0.5
+    } else {
+        let mut da = a1 - a2;
+        while da < 0.0 { da += std::f32::consts::TAU; }
+        if large_arc && da < std::f32::consts::PI { da += std::f32::consts::TAU; }
+        if !large_arc && da > std::f32::consts::PI { da -= std::f32::consts::TAU; }
+        a1 - da * 0.5
+    };
+
+    let mid = [cx + r * mid_a.cos(), cy + r * mid_a.sin()];
+    Some(([x1, y1], mid, [x2, y2]))
+}
+
+/// Parse SVG path (M, L, A, Z commands) to a list of mm polygon points.
+/// Arc segments are approximated by adding only the arc endpoint.
+fn parse_svg_path_pts(path: &str, cx0: f32, cy0: f32, scale: f32) -> Vec<[f32; 2]> {
+    let mut result: Vec<[f32; 2]> = Vec::new();
+    let mut cmd = 'M';
+    let mut num_buf = String::new();
+
+    let process = |c: char, buf: &str, cx0: f32, cy0: f32, scale: f32, result: &mut Vec<[f32;2]>| {
+        let nums: Vec<f32> = buf.split(|ch: char| ch == ',' || ch.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        match c {
+            'M' | 'L' => {
+                for chunk in nums.chunks_exact(2) {
+                    result.push([(chunk[0] - cx0) * scale, (chunk[1] - cy0) * scale]);
+                }
+            }
+            'A' => {
+                // rx ry rotation largeArc sweep x y — take only the endpoint
+                for chunk in nums.chunks_exact(7) {
+                    result.push([(chunk[5] - cx0) * scale, (chunk[6] - cy0) * scale]);
+                }
+            }
+            _ => {}
+        }
+    };
+
+    for ch in path.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_alphabetic() && ch != 'e' && ch != 'E' {
+            process(cmd, &num_buf, cx0, cy0, scale, &mut result);
+            num_buf.clear();
+            cmd = ch;
+        } else if ch == ',' {
+            num_buf.push(' ');
+        } else {
+            num_buf.push(ch);
+        }
+    }
+    result
 }
 
 fn extract_fp_graphics(easyeda: &serde_json::Value) -> Vec<FpGraphic> {
@@ -983,25 +1126,52 @@ fn extract_fp_graphics(easyeda: &serde_json::Value) -> Vec<FpGraphic> {
                 });
             }
 
+        } else if s.starts_with("ARC~") {
+            // ARC~strokeWidth~layer~net~svgPath~id
+            let p: Vec<&str> = s.split('~').collect();
+            if p.len() < 5 { continue; }
+            let sw: f32 = p[1].parse().unwrap_or(0.0);
+            let layer_n: i32 = p[2].parse().unwrap_or(-1);
+            let layer = match ee_layer_to_kicad(layer_n) { Some(l) => l.to_string(), None => continue };
+            let width = (sw * SCALE).max(0.01);
+            if let Some((start, mid, end)) = parse_arc_path(p[4], cx0, cy0, SCALE) {
+                out.push(FpGraphic::Arc { start, mid, end, width, layer });
+            }
+
         } else if s.starts_with("SOLIDREGION~") {
-            // SOLIDREGION~layer~net~polygon_points~type~id
+            // SOLIDREGION~layer~net~svgPath~type~id
             let p: Vec<&str> = s.split('~').collect();
             if p.len() < 4 { continue; }
             let layer_n: i32 = p[1].parse().unwrap_or(-1);
             let layer = match ee_layer_to_kicad(layer_n) { Some(l) => l.to_string(), None => continue };
-            let pts_raw: Vec<f32> = p[3]
-                .split(|c: char| c == ' ' || c == ',')
-                .filter_map(|t| { let t = t.trim(); if t.is_empty() { None } else { t.parse().ok() } })
-                .collect();
-            if pts_raw.len() < 6 { continue; }
-            let pts: Vec<[f32; 2]> = pts_raw.chunks_exact(2)
-                .map(|c| { let (x, y) = to_mm(c[0], c[1]); [x, y] })
-                .collect();
-
-            // Export ALL polygons - don't filter based on size
-            let fill = layer != "F.CrtYd" && layer != "B.CrtYd";
+            // p[3] may be a plain "x y x y …" list or a full SVG path with M/L/A/Z
+            let pts: Vec<[f32; 2]> = if p[3].chars().any(|c| c.is_ascii_alphabetic()) {
+                parse_svg_path_pts(p[3], cx0, cy0, SCALE)
+            } else {
+                p[3].split(|c: char| c == ' ' || c == ',')
+                    .filter_map(|t| { let t = t.trim(); if t.is_empty() { None } else { t.parse::<f32>().ok() } })
+                    .collect::<Vec<f32>>()
+                    .chunks_exact(2)
+                    .map(|c| { let (x, y) = to_mm(c[0], c[1]); [x, y] })
+                    .collect()
+            };
+            if pts.len() < 3 { continue; }
+            let fill  = layer != "F.CrtYd" && layer != "B.CrtYd" && layer != "Edge.Cuts";
             let width = if layer == "F.CrtYd" || layer == "B.CrtYd" { 0.05 } else { 0.12 };
             out.push(FpGraphic::Poly { pts, width, layer, fill });
+
+        } else if s.starts_with("HOLE~") {
+            // HOLE~cx~cy~diameter~id  — non-plated through hole, export as Edge.Cuts circle
+            let p: Vec<&str> = s.split('~').collect();
+            if p.len() < 4 { continue; }
+            let ecx: f32 = p[1].parse().unwrap_or(0.0);
+            let ecy: f32 = p[2].parse().unwrap_or(0.0);
+            let diam: f32 = p[3].parse().unwrap_or(0.0);
+            let (cx, cy) = to_mm(ecx, ecy);
+            let r_mm = diam * SCALE * 0.5;
+            if r_mm > 0.0 {
+                out.push(FpGraphic::Circle { cx, cy, r: r_mm, width: 0.05, layer: "Edge.Cuts".into() });
+            }
         }
     }
     out
