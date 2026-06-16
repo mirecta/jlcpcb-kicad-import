@@ -326,11 +326,26 @@ fn build_footprint(
         };
 
         if pad.drill > 0.0 {
+            let hw = pad.w * 0.5;
+            let hh = pad.h * 0.5;
+            let drill_field = if pad.shape == "oval" && (hw - hh).abs() > 0.01 {
+                // Oval slot: milled, not drilled — KiCad uses (drill oval slot_w slot_h)
+                let slot_minor = pad.drill;
+                let slot_major = if hw <= hh {
+                    pad.drill * hh / hw
+                } else {
+                    pad.drill * hw / hh
+                };
+                let (sw, sh) = if hw <= hh { (slot_minor, slot_major) } else { (slot_major, slot_minor) };
+                format!("oval {:.4} {:.4}", sw, sh)
+            } else {
+                format!("{:.4}", pad.drill)
+            };
             pads.push_str(&format!(
-                "  (pad \"{}\" thru_hole {} (at {:.4} {:.4}{}) (size {:.4} {:.4}) (drill {:.4}) (layers \"*.Cu\" \"*.Mask\"))\n",
+                "  (pad \"{}\" thru_hole {} (at {:.4} {:.4}{}) (size {:.4} {:.4}) (drill {}) (layers \"*.Cu\" \"*.Mask\"))\n",
                 esc_pad(&pad.number), pad.shape,
                 pad.cx, pad.cy, rot_field,
-                pad.w, pad.h, pad.drill,
+                pad.w, pad.h, drill_field,
             ));
         } else {
             pads.push_str(&format!(

@@ -583,11 +583,34 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
     let thick = 1.6_f32;
     let mut v: Vec<f32> = Vec::new();
 
-    // Collect drill holes for surface tessellation
-    let holes: Vec<(f32, f32, f32)> = pads.iter()
-        .filter(|p| p.drill > 0.0)
-        .map(|p| (p.cx, p.cy, p.drill * 0.5))
-        .collect();
+    // Collect drill/slot holes for surface tessellation
+    let mut holes: Vec<(f32, f32, f32)> = Vec::new();
+    for pad in pads.iter().filter(|p| p.drill > 0.0) {
+        let dr = pad.drill * 0.5;
+        let hw = pad.w * 0.5;
+        let hh = pad.h * 0.5;
+        if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
+            // Oval milled slot: tessellate surface with two end circles
+            let (hole_hw, hole_hh) = if hw <= hh {
+                (dr, (dr * hh / hw).max(dr))
+            } else {
+                ((dr * hw / hh).max(dr), dr)
+            };
+            let rad = pad.rotation.to_radians();
+            let (rs, rc) = (rad.sin(), rad.cos());
+            if hw <= hh {
+                let ext = hole_hh - hole_hw;
+                holes.push((pad.cx + ext * rs, pad.cy - ext * rc, hole_hw));
+                holes.push((pad.cx - ext * rs, pad.cy + ext * rc, hole_hw));
+            } else {
+                let ext = hole_hw - hole_hh;
+                holes.push((pad.cx + ext * rc, pad.cy + ext * rs, hole_hh));
+                holes.push((pad.cx - ext * rc, pad.cy - ext * rs, hole_hh));
+            }
+        } else {
+            holes.push((pad.cx, pad.cy, dr));
+        }
+    }
 
     // Top surface (Z=0) and bottom surface (Z=-thick) — tessellated with real holes
     let top_green = [0.10_f32, 0.42, 0.12];
@@ -663,13 +686,19 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
         if pad.drill > 0.0 {
             let dr = pad.drill * 0.5;  // hole radius in mm
             if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
-                // Oval through-hole: draw correct oval copper shape on top/bottom,
-                // then punch a visible drill hole on top of it.
+                // Oval milled slot through-hole
+                let (hole_hw, hole_hh) = if hw <= hh {
+                    (dr, (dr * hh / hw).max(dr))
+                } else {
+                    ((dr * hw / hh).max(dr), dr)
+                };
+                // Oval copper pad on top/bottom, then oval PCB-green punch for the slot opening
                 draw_pad(&mut v, pad, hw, hh, 0.04, pc);
-                circle_y(&mut v, pad.cx, pad.cy, dr, 0.07, top_green);
+                draw_pad(&mut v, pad, hole_hw, hole_hh, 0.07, top_green);
                 draw_pad(&mut v, pad, hw, hh, -thick - 0.04, pc);
-                circle_y(&mut v, pad.cx, pad.cy, dr, -thick - 0.07, bot_green);
-                cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.04, -thick - 0.04, pc);
+                draw_pad(&mut v, pad, hole_hw, hole_hh, -thick - 0.07, bot_green);
+                // Circular barrel at slot minor radius
+                cylinder_hole(&mut v, pad.cx, pad.cy, hole_hw.min(hole_hh), 0.04, -thick - 0.04, pc);
             } else {
                 // Circular/rect through-hole: annular ring approach
                 let r_o = hw.max(hh);
