@@ -124,7 +124,6 @@ struct AppState {
     wrl_bytes: Option<Vec<u8>>,   // VRML 2.0 bytes (converted from EasyEDA OBJ)
     step_bytes: Option<Vec<u8>>,  // raw STEP binary
     symbol_texture: Option<TextureHandle>,
-    footprint_texture: Option<TextureHandle>,
 
     // SVG preview pan/zoom
     sym_pz: PanZoom,
@@ -220,7 +219,6 @@ impl App {
         self.state.selected_idx = None;
         self.state.component = None;
         self.state.symbol_texture = None;
-        self.state.footprint_texture = None;
         self.state.status = format!("Searching for \"{}\"…", query);
         let basic_only = self.state.basic_only;
         self.spawn(move |tx| {
@@ -234,7 +232,6 @@ impl App {
     fn do_detail(&mut self, lcsc_id: String, ctx: &egui::Context) {
         self.state.component = None;
         self.state.symbol_texture = None;
-        self.state.footprint_texture = None;
         self.state.wrl_bytes = None;
         self.state.step_bytes = None;
         self.state.status = format!("Loading {}…", lcsc_id);
@@ -362,12 +359,6 @@ impl eframe::App for App {
                                 Some(ctx.load_texture("symbol", img, Default::default()));
                         }
                     }
-                    if let Some(svg) = &comp.footprint_svg {
-                        if let Ok(img) = preview::svg_to_image(svg, 1200, 900) {
-                            self.state.footprint_texture =
-                                Some(ctx.load_texture("footprint", img, Default::default()));
-                        }
-                    }
                     self.state.sym_pz.reset();
                     self.state.fp_pz.reset();
                     // Default ref/val positions just outside the symbol body bounds
@@ -440,7 +431,6 @@ impl eframe::App for App {
                     // Clear stale data so UI doesn't show broken mix of old+new
                     self.state.component = None;
                     self.state.symbol_texture = None;
-                    self.state.footprint_texture = None;
                     self.state.wrl_bytes = None;
                     self.state.step_bytes = None;
                     self.state.model_viewer.has_model = false;
@@ -846,11 +836,13 @@ impl eframe::App for App {
                     });
                     cols[0].add_space(4.0);
                     cols[0].label(egui::RichText::new("Footprint  (drag: pan  scroll: zoom)").strong());
-                    if let Some(tex) = &self.state.footprint_texture {
-                        show_panzoom_image(&mut cols[0], tex, egui::Vec2::new(460.0, 320.0), &mut self.state.fp_pz, "fp");
-                    } else {
-                        cols[0].label("(no preview)");
-                    }
+                    show_footprint_preview(
+                        &mut cols[0],
+                        &comp.pads,
+                        &comp.fp_graphics,
+                        &mut self.state.fp_pz,
+                        egui::Vec2::new(460.0, 320.0),
+                    );
 
                     // Right: attributes table
                     cols[1].label(egui::RichText::new("Attributes").strong());
@@ -1453,6 +1445,208 @@ fn show_symbol_preview(
             "dbl-click: reset",
             egui::FontId::proportional(10.0),
             egui::Color32::from_gray(150),
+        );
+    }
+}
+
+fn show_footprint_preview(
+    ui: &mut egui::Ui,
+    pads: &[api::Pad],
+    graphics: &[api::FpGraphic],
+    pz: &mut PanZoom,
+    display_size: egui::Vec2,
+) {
+    let (rect, response) = ui.allocate_exact_size(display_size, egui::Sense::click_and_drag());
+
+    if response.dragged() {
+        pz.pan += response.drag_delta();
+    }
+    let pointer_over = ui.input(|i| i.pointer.hover_pos().map_or(false, |p| rect.contains(p)));
+    if pointer_over {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 0.1 {
+            ui.input_mut(|i| {
+                i.smooth_scroll_delta = egui::Vec2::ZERO;
+                i.raw_scroll_delta    = egui::Vec2::ZERO;
+            });
+            pz.zoom = (pz.zoom * (1.0 + scroll * 0.005)).clamp(0.05, 50.0);
+        }
+    }
+    if response.double_clicked() { pz.reset(); }
+
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(20, 50, 22));
+
+    // Compute bounds from pads + graphics for auto-fit
+    let mut min_x = f32::MAX; let mut max_x = f32::MIN;
+    let mut min_y = f32::MAX; let mut max_y = f32::MIN;
+    let mut expand = |x: f32, y: f32, r: f32| {
+        min_x = min_x.min(x - r); max_x = max_x.max(x + r);
+        min_y = min_y.min(y - r); max_y = max_y.max(y + r);
+    };
+    for p in pads {
+        expand(p.cx, p.cy, p.w.max(p.h) * 0.5);
+    }
+    for g in graphics {
+        match g {
+            api::FpGraphic::Line { x1, y1, x2, y2, .. } => {
+                expand(*x1, *y1, 0.0); expand(*x2, *y2, 0.0);
+            }
+            api::FpGraphic::Circle { cx, cy, r, .. } => {
+                expand(*cx, *cy, *r);
+            }
+            api::FpGraphic::Poly { pts, .. } => {
+                for p in pts { expand(p[0], p[1], 0.0); }
+            }
+        }
+    }
+    if min_x > max_x { min_x = -5.0; max_x = 5.0; min_y = -5.0; max_y = 5.0; }
+
+    let margin = 2.0_f32;
+    min_x -= margin; max_x += margin; min_y -= margin; max_y += margin;
+
+    let base_scale = (display_size.x / (max_x - min_x).max(1.0))
+        .min(display_size.y / (max_y - min_y).max(1.0)) * 0.85;
+    let scale = base_scale * pz.zoom;
+    let cx_mm = (min_x + max_x) * 0.5;
+    let cy_mm = (min_y + max_y) * 0.5;
+    let center = rect.center() + pz.pan;
+
+    // PCB coords: X+ right, Y+ down (screen direction)
+    let ts = |mx: f32, my: f32| egui::pos2(
+        center.x + (mx - cx_mm) * scale,
+        center.y + (my - cy_mm) * scale,
+    );
+
+    let layer_color = |layer: &str| -> egui::Color32 {
+        match layer {
+            "F.SilkS" | "B.SilkS" => egui::Color32::from_rgb(200, 200, 200),
+            "F.CrtYd" | "B.CrtYd" => egui::Color32::from_rgb(255, 210, 0),
+            "F.Fab"   | "B.Fab"   => egui::Color32::from_rgb(120, 90, 40),
+            _ => egui::Color32::from_gray(90),
+        }
+    };
+
+    // Draw graphics: courtyard/fab first, silkscreen on top
+    for pass in &["F.Fab", "B.Fab", "F.CrtYd", "B.CrtYd", "F.SilkS", "B.SilkS"] {
+        for g in graphics {
+            let (g_layer, g_width) = match g {
+                api::FpGraphic::Line  { layer, width, .. } => (layer.as_str(), *width),
+                api::FpGraphic::Circle{ layer, width, .. } => (layer.as_str(), *width),
+                api::FpGraphic::Poly  { layer, width, .. } => (layer.as_str(), *width),
+            };
+            if g_layer != *pass { continue; }
+            let col = layer_color(g_layer);
+            let pw  = (g_width * scale).max(1.0);
+            match g {
+                api::FpGraphic::Line { x1, y1, x2, y2, .. } => {
+                    painter.line_segment([ts(*x1, *y1), ts(*x2, *y2)], egui::Stroke::new(pw, col));
+                }
+                api::FpGraphic::Circle { cx, cy, r, .. } => {
+                    painter.circle_stroke(ts(*cx, *cy), r * scale, egui::Stroke::new(pw, col));
+                }
+                api::FpGraphic::Poly { pts, fill, .. } => {
+                    if pts.len() >= 2 {
+                        let spts: Vec<egui::Pos2> = pts.iter().map(|p| ts(p[0], p[1])).collect();
+                        painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                            points: spts,
+                            closed: true,
+                            fill: egui::Color32::TRANSPARENT,
+                            stroke: egui::epaint::PathStroke::new(pw, col),
+                        }));
+                        let _ = fill;
+                    }
+                }
+            }
+        }
+    }
+
+    // Draw pads — copper colored with rotation support
+    let copper     = egui::Color32::from_rgb(185, 140, 10);
+    let drill_bg   = egui::Color32::from_rgb(20, 50, 22);
+    let num_col    = egui::Color32::from_rgb(30, 20, 0);
+    let font_sz    = (scale * 0.7).clamp(7.0, 12.0);
+
+    for pad in pads {
+        let hw  = pad.w * 0.5;
+        let hh  = pad.h * 0.5;
+        let pcx = ts(pad.cx, pad.cy);
+        let rad = pad.rotation.to_radians();
+        let (sn, cs) = (rad.sin(), rad.cos());
+
+        // Rotate local-space point to world, then to screen
+        let rot_pt = |lx: f32, ly: f32| egui::pos2(
+            center.x + (pad.cx + lx * cs - ly * sn - cx_mm) * scale,
+            center.y + (pad.cy + lx * sn + ly * cs - cy_mm) * scale,
+        );
+
+        match pad.shape.as_str() {
+            "rect" => {
+                let corners = vec![
+                    rot_pt(-hw, -hh), rot_pt(hw, -hh),
+                    rot_pt(hw,  hh),  rot_pt(-hw, hh),
+                ];
+                painter.add(egui::Shape::convex_polygon(corners, copper, egui::Stroke::NONE));
+            }
+            "oval" => {
+                let diff = hw - hh;
+                if diff.abs() < 0.01 {
+                    painter.circle_filled(pcx, hw * scale, copper);
+                } else if diff > 0.0 {
+                    // Wider than tall: pill along X
+                    let c1 = rot_pt(-diff, 0.0);
+                    let c2 = rot_pt( diff, 0.0);
+                    let cs2 = vec![
+                        rot_pt(-diff, -hh), rot_pt(diff, -hh),
+                        rot_pt( diff,  hh), rot_pt(-diff, hh),
+                    ];
+                    painter.add(egui::Shape::convex_polygon(cs2, copper, egui::Stroke::NONE));
+                    painter.circle_filled(c1, hh * scale, copper);
+                    painter.circle_filled(c2, hh * scale, copper);
+                } else {
+                    // Taller than wide: pill along Y
+                    let ext = hh - hw;
+                    let c1 = rot_pt(0.0, -ext);
+                    let c2 = rot_pt(0.0,  ext);
+                    let cs2 = vec![
+                        rot_pt(-hw, -ext), rot_pt(hw, -ext),
+                        rot_pt( hw,  ext), rot_pt(-hw, ext),
+                    ];
+                    painter.add(egui::Shape::convex_polygon(cs2, copper, egui::Stroke::NONE));
+                    painter.circle_filled(c1, hw * scale, copper);
+                    painter.circle_filled(c2, hw * scale, copper);
+                }
+            }
+            _ => {
+                // circle
+                painter.circle_filled(pcx, hw.max(hh) * scale, copper);
+            }
+        }
+
+        if pad.drill > 0.0 {
+            let dr = pad.drill * 0.5 * scale;
+            painter.circle_filled(pcx, dr, drill_bg);
+            painter.circle_stroke(pcx, dr, egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 60, 0)));
+        }
+
+        if font_sz >= 7.0 {
+            painter.text(pcx, egui::Align2::CENTER_CENTER, &pad.number,
+                egui::FontId::proportional(font_sz), num_col);
+        }
+    }
+
+    if pads.is_empty() && graphics.is_empty() {
+        painter.text(rect.center(), egui::Align2::CENTER_CENTER,
+            "No footprint data",
+            egui::FontId::proportional(14.0), egui::Color32::from_gray(140));
+    }
+    if pz.zoom != 1.0 || pz.pan != egui::Vec2::ZERO {
+        painter.text(
+            rect.right_bottom() + egui::vec2(-4.0, -4.0),
+            egui::Align2::RIGHT_BOTTOM,
+            "dbl-click: reset",
+            egui::FontId::proportional(10.0),
+            egui::Color32::from_gray(160),
         );
     }
 }
