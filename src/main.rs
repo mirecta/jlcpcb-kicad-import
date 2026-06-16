@@ -380,40 +380,38 @@ impl eframe::App for App {
                     };
                     self.state.ref_pos = [0.0, body_max_y + 2.54];
                     self.state.val_pos = [0.0, body_min_y - 2.54];
-                    // Init 3D model placement from EasyEDA c_origin / c_rotation so the
-                    // viewer starts at the same position as KiCad's 3D viewer.
-                    // export.rs negates model_rotation when writing KiCad format, so storing
-                    // c_rotation directly here means the export produces -c_rotation, which
-                    // matches JLC2KiCadLib output (Python also negates c_rotation on export).
-                    self.state.model_offset   = comp.model_init_offset;
-                    self.state.model_rotation = comp.model_init_rotation;
+                    // Start all model params at zero/unity so what you see in our app
+                    // is exactly what gets written to KiCad (same numbers, same visual).
+                    self.state.model_offset   = [0.0, 0.0, 0.0];
+                    self.state.model_rotation = [0.0, 0.0, 0.0];
                     self.state.model_scale    = [1.0, 1.0, 1.0];
                     self.state.model_viewer.reset_view();
                     let pads: Vec<model3d::PadInfo> = comp.pads.iter()
                         .map(|p| {
                             model3d::PadInfo {
-                                cx: p.cx, cy: p.cy,
+                                cx: p.cx, cy: -p.cy,  // negate Y: KiCad 3D negates PCB Y-down to Y-up
                                 w: p.w, h: p.h,
                                 shape: p.shape.clone(),
                                 drill: p.drill,
                                 drill_slot: p.drill_slot,
                                 npth: p.npth,
-                                rotation: p.rotation,
-                                poly_pts: p.poly_pts.clone(),
+                                rotation: -p.rotation,  // Y-flip also mirrors rotation
+                                poly_pts: p.poly_pts.iter().map(|pt| [pt[0], -pt[1]]).collect(),
                             }
                         })
                         .collect();
                     let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
-                        .map(|d| model3d::PcbDrawing { tris: d.tris.clone(), color: d.color })
+                        .map(|d| model3d::PcbDrawing {
+                            tris: d.tris.iter().map(|pt| [pt[0], -pt[1]]).collect(),
+                            color: d.color,
+                        })
                         .collect();
                     // Prefer STEP over WRL - better format, more standard
                     if let Some(ref bytes) = step {
-                        // Load STEP as-is, no rotation - viewer is Z-up to match
-                        // Don't center - JLCPCB files have correct origin for pad alignment
                         self.state.model_viewer.load_step(bytes, &pads, &drawings, [0.0, 0.0, 0.0], false);
                     } else if let Some(ref bytes) = wrl {
-                        // VRML from JLCPCB is Y-up; rotate +90° around X to match viewer (Z-up)
-                        self.state.model_viewer.load(bytes, &pads, &drawings, [90.0, 0.0, 0.0]);
+                        // No pre_rotation - params must match KiCad exactly (user adjusts if needed)
+                        self.state.model_viewer.load(bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
                     } else {
                         self.state.model_viewer.has_model = false;
                     }

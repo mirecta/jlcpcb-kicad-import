@@ -817,10 +817,13 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
             Some(s) if s.starts_with("PAD~") => s,
             _ => continue,
         };
-        // PAD~shape~cx~cy~w~h~layer~net~number~holeRadius~holePoints~rotation~id~...
-        // p[9]  = holeRadius in EasyEDA units (radius, not diameter); 0 for SMD
-        // p[10] = holePoints: "0" for round hole, "x1 y1 x2 y2" for oval/slot
-        // p[11] = rotation in degrees
+        // PAD~shape~cx~cy~w~h~layer~net~number~holeRadius~holePoints~rotation~id~drillOffset~...
+        // Mirrors JLC2KiCadLib Python field mapping (data[] = p[1..]):
+        //   p[9]  = hole radius (EasyEDA units)
+        //   p[10] = polygon nodes for POLYGON pads; ignored for all other shapes
+        //   p[11] = rotation
+        //   p[12] = id
+        //   p[13] = drill_offset (non-zero → oval/slot drill)
         let p: Vec<&str> = s.split('~').collect();
         if p.len() < 6 { continue; }
 
@@ -833,11 +836,9 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
 
         let layer  = p.get(6).copied().unwrap_or("1");
         let number = p.get(8).copied().unwrap_or("1").to_string();
-        // p[9] = hole radius in EasyEDA units (0 = SMD pad)
-        let hole_r_ee: f32 = p.get(9).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
-        // p[10] = hole points: "0" for round, "x1 y1 x2 y2" for oval/slot (slot endpoints)
-        let hole_pts_str = p.get(10).copied().unwrap_or("0");
-        let rotation: f32  = p.get(11).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        let hole_r_ee: f32    = p.get(9) .and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+        let drill_offset_ee: f32 = p.get(13).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+        let rotation: f32     = p.get(11).and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
         let is_tht = layer == "11";
 
@@ -850,34 +851,31 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
             }
         };
 
-        // Parse polygon vertices for POLYGON pads (p[10] = space-separated x y pairs)
+        // POLYGON pads: vertices from p[10]; THT POLYGON builds rect from w×h (no polygon data there)
         let poly_pts_ee: Vec<[f32; 2]> = if kicad_shape == "polygon" {
-            let nums: Vec<f32> = p.get(10).copied().unwrap_or("")
-                .split_whitespace()
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            let mut pts: Vec<[f32; 2]> = nums.chunks(2)
-                .filter(|c| c.len() == 2)
-                .map(|c| [c[0], c[1]])
-                .collect();
-            // Remove consecutive duplicate points EasyEDA often emits
-            pts.dedup_by(|a, b| (a[0] - b[0]).abs() < 0.001 && (a[1] - b[1]).abs() < 0.001);
-            pts
+            if is_tht {
+                let hw = w * 0.5;
+                let hh = h * 0.5;
+                vec![[cx-hw, cy-hh],[cx+hw, cy-hh],[cx+hw, cy+hh],[cx-hw, cy+hh]]
+            } else {
+                let nums: Vec<f32> = p.get(10).copied().unwrap_or("")
+                    .split_whitespace()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                let mut pts: Vec<[f32; 2]> = nums.chunks(2)
+                    .filter(|c| c.len() == 2)
+                    .map(|c| [c[0], c[1]])
+                    .collect();
+                pts.dedup_by(|a, b| (a[0] - b[0]).abs() < 0.001 && (a[1] - b[1]).abs() < 0.001);
+                pts
+            }
         } else {
             vec![]
         };
 
-        // Parse slot length from holePoints endpoint pair (p[10] = "x1 y1 x2 y2" for slots)
-        let slot_length_ee: f32 = if is_tht && hole_pts_str != "0" && !hole_pts_str.trim().is_empty() {
-            let coords: Vec<f32> = hole_pts_str.split_whitespace()
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            if coords.len() >= 4 {
-                let dx = coords[2] - coords[0];
-                let dy = coords[3] - coords[1];
-                (dx * dx + dy * dy).sqrt()
-            } else { 0.0 }
-        } else { 0.0 };
+        // Slot detection: use drill_offset (p[13]) exactly like Python's h_PAD.
+        // drill_offset > 0 means the hole is a slot; its minor axis = hole_r_ee*2, major = drill_offset.
+        let slot_length_ee: f32 = if is_tht && drill_offset_ee > 0.0 { drill_offset_ee } else { 0.0 };
 
         raw.push((cx, cy, w, h, number, kicad_shape.to_string(), rotation, is_tht, hole_r_ee, slot_length_ee, poly_pts_ee));
     }
@@ -905,9 +903,9 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
                 fallback
             }
         } else { 0.0 };
-        // Oval slot major axis: distance between slot endpoint centres + 2 × minor radius
-        let drill_slot = if is_tht && slot_length_ee > 0.0 && hole_r_ee > 0.0 {
-            let major = (slot_length_ee + hole_r_ee * 2.0) * SCALE;
+        // Slot: major axis = drill_offset (p[13]) in EasyEDA units, same as Python h_PAD.
+        let drill_slot = if is_tht && slot_length_ee > 0.0 {
+            let major = slot_length_ee * SCALE;
             if major > drill { major } else { 0.0 }
         } else { 0.0 };
         // Transform polygon vertices to mm relative to footprint centroid

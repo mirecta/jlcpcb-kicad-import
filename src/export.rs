@@ -317,6 +317,42 @@ fn build_footprint(
 ) -> String {
     let name = package_name(c);
 
+    // Compute bounding box from pads + SilkS/Fab graphics to place labels outside the footprint
+    let mut all_ys: Vec<f32> = c.pads.iter()
+        .flat_map(|p| [p.cy - p.h * 0.5, p.cy + p.h * 0.5])
+        .collect();
+    for g in &c.fp_graphics {
+        let silkfab = match g {
+            FpGraphic::Line   { layer, .. } => layer.contains("SilkS") || layer.contains("Fab"),
+            FpGraphic::Circle { layer, .. } => layer.contains("SilkS") || layer.contains("Fab"),
+            FpGraphic::Poly   { layer, .. } => layer.contains("SilkS") || layer.contains("Fab"),
+            FpGraphic::Arc    { layer, .. } => layer.contains("SilkS") || layer.contains("Fab"),
+        };
+        if !silkfab { continue; }
+        match g {
+            FpGraphic::Line   { y1, y2, .. } => { all_ys.push(*y1); all_ys.push(*y2); }
+            FpGraphic::Circle { cy, r, .. }  => { all_ys.push(cy - r); all_ys.push(cy + r); }
+            FpGraphic::Poly   { pts, .. }    => all_ys.extend(pts.iter().map(|p| p[1])),
+            FpGraphic::Arc    { start, mid, end, .. } => {
+                all_ys.push(start[1]); all_ys.push(mid[1]); all_ys.push(end[1]);
+            }
+        }
+    }
+    let (body_min_y, body_max_y) = if all_ys.is_empty() {
+        (-2.0_f32, 2.0_f32)
+    } else {
+        (all_ys.iter().cloned().fold(f32::INFINITY, f32::min),
+         all_ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max))
+    };
+    let pad_mid_y = {
+        let pad_ys: Vec<f32> = c.pads.iter().map(|p| p.cy).collect();
+        if pad_ys.is_empty() { 0.0 }
+        else { pad_ys.iter().sum::<f32>() / pad_ys.len() as f32 }
+    };
+    let ref_y  = body_min_y - 2.0;   // 2mm above full body outline
+    let val_y  = body_max_y + 2.0;   // 2mm below full body outline
+    let fab_y  = pad_mid_y;          // centroid of pads (for ${REFERENCE} marker)
+
     let mut pads = String::new();
     for pad in &c.pads {
         let rot_field = if pad.rotation.abs() > 0.01 {
@@ -334,17 +370,32 @@ fn build_footprint(
             continue;
         }
 
-        if pad.drill > 0.0 {
+        if pad.drill > 0.0 && pad.shape == "polygon" && pad.poly_pts.len() >= 3 {
+            // THT custom polygon pad — same as Python SHAPE_CUSTOM with gr_poly + drill
             let hw = pad.w * 0.5;
             let hh = pad.h * 0.5;
             let drill_field = if pad.drill_slot > 0.0 {
-                // Actual slot dimensions from EasyEDA data
+                let (sw, sh) = if hw >= hh { (pad.drill_slot, pad.drill) } else { (pad.drill, pad.drill_slot) };
+                format!("oval {:.4} {:.4}", sw, sh)
+            } else {
+                format!("{:.4}", pad.drill)
+            };
+            let pts_str: String = pad.poly_pts.iter()
+                .map(|p| format!("        (xy {:.4} {:.4})", p[0] - pad.cx, p[1] - pad.cy))
+                .collect::<Vec<_>>().join("\n");
+            pads.push_str(&format!(
+                "  (pad \"{}\" thru_hole custom (at {:.4} {:.4}{}) (size 0.1 0.1) (drill {}) (layers \"*.Cu\" \"*.Mask\")\n    (primitives\n      (gr_poly (pts\n{}\n      ) (width 0) (fill yes))\n    )\n  )\n",
+                esc_pad(&pad.number), pad.cx, pad.cy, rot_field, drill_field, pts_str,
+            ));
+        } else if pad.drill > 0.0 {
+            let hw = pad.w * 0.5;
+            let hh = pad.h * 0.5;
+            let drill_field = if pad.drill_slot > 0.0 {
                 let minor = pad.drill;
                 let major = pad.drill_slot;
                 let (sw, sh) = if hw >= hh { (major, minor) } else { (minor, major) };
                 format!("oval {:.4} {:.4}", sw, sh)
             } else if pad.shape == "oval" && (hw - hh).abs() > 0.01 {
-                // Derive slot from pad aspect ratio when no explicit slot data
                 let slot_minor = pad.drill;
                 let slot_major = if hw <= hh { pad.drill * hh / hw } else { pad.drill * hw / hh };
                 let (sw, sh) = if hw <= hh { (slot_minor, slot_major) } else { (slot_major, slot_minor) };
@@ -359,17 +410,13 @@ fn build_footprint(
                 pad.w, pad.h, drill_field,
             ));
         } else if pad.shape == "polygon" && pad.poly_pts.len() >= 3 {
-            // KiCad custom polygon pad — points are relative to pad centre
+            // SMD custom polygon pad — Python SHAPE_CUSTOM, size 0.1×0.1
             let pts_str: String = pad.poly_pts.iter()
                 .map(|p| format!("        (xy {:.4} {:.4})", p[0] - pad.cx, p[1] - pad.cy))
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect::<Vec<_>>().join("\n");
             pads.push_str(&format!(
-                "  (pad \"{}\" smd custom (at {:.4} {:.4}{}) (size {:.4} {:.4})\n    (layers \"F.Cu\" \"F.Paste\" \"F.Mask\")\n    (primitives\n      (gr_poly (pts\n{}\n      ) (width 0) (fill yes))\n    )\n  )\n",
-                esc_pad(&pad.number),
-                pad.cx, pad.cy, rot_field,
-                pad.w, pad.h,
-                pts_str,
+                "  (pad \"{}\" smd custom (at {:.4} {:.4}{}) (size 0.1 0.1)\n    (layers \"F.Cu\" \"F.Paste\" \"F.Mask\")\n    (primitives\n      (gr_poly (pts\n{}\n      ) (width 0) (fill yes))\n    )\n  )\n",
+                esc_pad(&pad.number), pad.cx, pad.cy, rot_field, pts_str,
             ));
         } else {
             pads.push_str(&format!(
@@ -420,13 +467,11 @@ fn build_footprint(
   (version 20221018) (generator jlcpcb-kicad)
   (layer "F.Cu")
   (descr "{desc}")
-  (property "Reference" "REF**" (at 0 -3 0) (layer "F.SilkS")
+  (fp_text reference REF** (at 0 {ref_y:.6}) (layer "F.SilkS")
     (effects (font (size 1 1) (thickness 0.15))))
-  (property "Value" "{name}" (at 0 3 0) (layer "F.Fab")
+  (fp_text value {name} (at 0 {val_y:.6}) (layer "F.Fab")
     (effects (font (size 1 1) (thickness 0.15))))
-  (property "LCSC" "{lcsc}" (at 0 0 0) (layer "F.Fab") (hide yes)
-    (effects (font (size 1.27 1.27))))
-  (fp_text user "${{REFERENCE}}" (at 0 0) (layer "F.Fab")
+  (fp_text user "${{REFERENCE}}" (at 0 {fab_y:.6}) (layer "F.Fab")
     (effects (font (size 1 1) (thickness 0.15))))
 {pads}{graphics}  (model "{model}"
     (offset (xyz {ox} {oy} {oz}))
@@ -437,13 +482,15 @@ fn build_footprint(
 "#,
         name = name,
         desc = esc(&c.description),
-        lcsc = c.lcsc_id,
+        ref_y = ref_y,
+        val_y = val_y,
+        fab_y = fab_y,
         pads = pads,
         graphics = graphics,
         model = model_path,
         ox = offset[0], oy = offset[1], oz = offset[2],
         sx = scale[0], sy = scale[1], sz = scale[2],
-        rx = -rotation[0], ry = -rotation[1], rz = -rotation[2],
+        rx = rotation[0], ry = rotation[1], rz = rotation[2],
     )
 }
 
