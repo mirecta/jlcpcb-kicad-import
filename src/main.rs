@@ -393,6 +393,7 @@ impl eframe::App for App {
                                 shape: p.shape.clone(),
                                 drill: p.drill,
                                 rotation: p.rotation,
+                                poly_pts: p.poly_pts.clone(),
                             }
                         })
                         .collect();
@@ -963,6 +964,7 @@ impl eframe::App for App {
                                                     shape: p.shape.clone(),
                                                     drill: p.drill,
                                                     rotation: p.rotation,
+                                                    poly_pts: p.poly_pts.clone(),
                                                 }
                                             })
                                             .collect();
@@ -1629,6 +1631,19 @@ fn show_footprint_preview(
                         egui::Color32::TRANSPARENT, pad_border));
                     painter.circle_stroke(c1, hw * scale, pad_border);
                     painter.circle_stroke(c2, hw * scale, pad_border);
+                }
+            }
+            "polygon" => {
+                if pad.poly_pts.len() >= 3 {
+                    let pts: Vec<egui::Pos2> = pad.poly_pts.iter()
+                        .map(|p| ts(p[0], p[1]))
+                        .collect();
+                    painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                        points: pts,
+                        closed: true,
+                        fill: copper,
+                        stroke: egui::epaint::PathStroke::new(1.0, egui::Color32::from_rgb(20, 50, 22)),
+                    }));
                 }
             }
             _ => {

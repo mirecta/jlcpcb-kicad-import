@@ -347,6 +347,19 @@ fn build_footprint(
                 pad.cx, pad.cy, rot_field,
                 pad.w, pad.h, drill_field,
             ));
+        } else if pad.shape == "polygon" && pad.poly_pts.len() >= 3 {
+            // KiCad custom polygon pad — points are relative to pad centre
+            let pts_str: String = pad.poly_pts.iter()
+                .map(|p| format!("        (xy {:.4} {:.4})", p[0] - pad.cx, p[1] - pad.cy))
+                .collect::<Vec<_>>()
+                .join("\n");
+            pads.push_str(&format!(
+                "  (pad \"{}\" smd custom (at {:.4} {:.4}{}) (size {:.4} {:.4})\n    (layers \"F.Cu\" \"F.Paste\" \"F.Mask\")\n    (primitives\n      (gr_poly (pts\n{}\n      ) (width 0) (fill yes))\n    )\n  )\n",
+                esc_pad(&pad.number),
+                pad.cx, pad.cy, rot_field,
+                pad.w, pad.h,
+                pts_str,
+            ));
         } else {
             pads.push_str(&format!(
                 "  (pad \"{}\" smd {} (at {:.4} {:.4}{}) (size {:.4} {:.4}) (layers \"F.Cu\" \"F.Paste\" \"F.Mask\"))\n",

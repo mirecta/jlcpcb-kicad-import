@@ -54,9 +54,10 @@ pub struct Pad {
     pub w:      f32,
     pub h:      f32,
     pub number: String, // pad number ("1", "2", "A1", …)
-    pub shape:  String, // KiCad shape: "oval", "rect", "circle"
+    pub shape:  String, // "oval", "rect", "circle", "polygon"
     pub rotation: f32,  // degrees
     pub drill:  f32,    // 0 = SMD, >0 = through-hole drill diameter in mm
+    pub poly_pts: Vec<[f32; 2]>, // polygon vertices in mm rel. to footprint centre (shape="polygon" only)
 }
 
 /// Graphical element extracted from EasyEDA schematic data for KiCad symbol body
@@ -802,9 +803,10 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
     // EasyEDA footprint units: 1 unit = 10 mil = 0.254 mm
     const SCALE: f32 = 0.254;
 
-    // (cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee)
+    // (cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee, poly_pts_ee)
     // hole_r_ee = hole radius in EasyEDA units (p[9]); 0 = SMD
-    let mut raw: Vec<(f32, f32, f32, f32, String, String, f32, bool, f32)> = Vec::new();
+    // poly_pts_ee = absolute EasyEDA coords of polygon vertices (shape="polygon" only)
+    let mut raw: Vec<(f32, f32, f32, f32, String, String, f32, bool, f32, Vec<[f32; 2]>)> = Vec::new();
 
     for shape in &shapes {
         let s = match shape.as_str() {
@@ -834,15 +836,32 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
         let is_tht = layer == "11";
 
         let kicad_shape = match ee_shape.to_uppercase().as_str() {
-            "OVAL" | "ELLIPSE" | "OBLONG"   => "oval",
-            "RECT" | "RECTANGLE" | "POLYGON" => "rect",
+            "OVAL" | "ELLIPSE" | "OBLONG" => "oval",
+            "RECT" | "RECTANGLE"          => "rect",
+            "POLYGON"                     => "polygon",
             _ => {
-                // Catch-all: if dimensions are clearly asymmetric, treat as oval
                 if (w - h).abs() > w.min(h) * 0.15 { "oval" } else { "circle" }
             }
         };
 
-        raw.push((cx, cy, w, h, number, kicad_shape.to_string(), rotation, is_tht, hole_r_ee));
+        // Parse polygon vertices for POLYGON pads (p[10] = space-separated x y pairs)
+        let poly_pts_ee: Vec<[f32; 2]> = if kicad_shape == "polygon" {
+            let nums: Vec<f32> = p.get(10).copied().unwrap_or("")
+                .split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            let mut pts: Vec<[f32; 2]> = nums.chunks(2)
+                .filter(|c| c.len() == 2)
+                .map(|c| [c[0], c[1]])
+                .collect();
+            // Remove consecutive duplicate points EasyEDA often emits
+            pts.dedup_by(|a, b| (a[0] - b[0]).abs() < 0.001 && (a[1] - b[1]).abs() < 0.001);
+            pts
+        } else {
+            vec![]
+        };
+
+        raw.push((cx, cy, w, h, number, kicad_shape.to_string(), rotation, is_tht, hole_r_ee, poly_pts_ee));
     }
 
     if raw.is_empty() { return vec![]; }
@@ -850,10 +869,7 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
     let cx0 = raw.iter().map(|(x, ..)| *x).sum::<f32>() / raw.len() as f32;
     let cy0 = raw.iter().map(|(_, y, ..)| *y).sum::<f32>() / raw.len() as f32;
 
-    raw.into_iter().map(|(cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee)| {
-        // drill field = hole DIAMETER in mm
-        // p[9] = holeRadius in EasyEDA units (1 unit = 0.254mm); diameter = p[9]*2*SCALE
-        // Accept only if result is ≥ 0.2mm (visible) and < 90% of smaller pad dim
+    raw.into_iter().map(|(cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee, poly_pts_ee)| {
         let fallback = w.min(h) * SCALE * 0.5;
         let drill = if is_tht {
             let from_data = hole_r_ee * 2.0 * SCALE;
@@ -863,6 +879,10 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
                 fallback
             }
         } else { 0.0 };
+        // Transform polygon vertices to mm relative to footprint centroid
+        let poly_pts = poly_pts_ee.into_iter()
+            .map(|[px, py]| [(px - cx0) * SCALE, (py - cy0) * SCALE])
+            .collect();
         Pad {
             cx: (cx - cx0) * SCALE,
             cy: (cy - cy0) * SCALE,
@@ -872,6 +892,7 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
             shape,
             rotation,
             drill,
+            poly_pts,
         }
     }).collect()
 }

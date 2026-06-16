@@ -47,9 +47,10 @@ pub struct PadInfo {
     pub cy: f32,  // centre Y in mm (Z-up, XY plane)
     pub w:  f32,
     pub h:  f32,
-    pub shape: String,  // "circle", "rect", "oval"
+    pub shape: String,  // "circle", "rect", "oval", "polygon"
     pub drill: f32,     // 0 = SMD; >0 = through-hole drill diameter in mm
     pub rotation: f32,  // rotation in degrees
+    pub poly_pts: Vec<[f32; 2]>,  // polygon vertices in mm (shape="polygon" only)
 }
 
 // ── Footprint drawing (silkscreen / fab layer flat geometry) ──────────────────
@@ -352,7 +353,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, rotation: p.rotation })
+                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, rotation: p.rotation, poly_pts: p.poly_pts.clone() })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -374,7 +375,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, rotation: p.rotation })
+                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, rotation: p.rotation, poly_pts: p.poly_pts.clone() })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -671,6 +672,21 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
                     rotated_quad(v, pad.cx, pad.cy, hw, hh - hw, rot, y, c);
                     circle_y(v, pad.cx + dx1, pad.cy + dy1, hw, y, c);
                     circle_y(v, pad.cx + dx2, pad.cy + dy2, hw, y, c);
+                }
+            }
+            "polygon" => {
+                // Fan-triangulate the polygon vertices (works for convex polygons)
+                let pts = &pad.poly_pts;
+                if pts.len() >= 3 {
+                    let n = [0.0_f32, 0.0, 1.0];
+                    let p0 = (pts[0][0], pts[0][1]);
+                    for i in 1..pts.len() - 1 {
+                        let p1 = (pts[i][0], pts[i][1]);
+                        let p2 = (pts[i + 1][0], pts[i + 1][1]);
+                        v.extend_from_slice(&[p0.0, p0.1, y]); v.extend_from_slice(&n); v.extend_from_slice(&c);
+                        v.extend_from_slice(&[p1.0, p1.1, y]); v.extend_from_slice(&n); v.extend_from_slice(&c);
+                        v.extend_from_slice(&[p2.0, p2.1, y]); v.extend_from_slice(&n); v.extend_from_slice(&c);
+                    }
                 }
             }
             _ => {
