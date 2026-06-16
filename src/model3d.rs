@@ -574,6 +574,18 @@ fn build_model_mat(offset: [f32; 3], rotation: [f32; 3], scale: [f32; 3], center
 // ── PCB + pad geometry ────────────────────────────────────────────────────────
 
 fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[PcbDrawing]) -> Vec<f32> {
+    // Debug: print pad data
+    if !pads.is_empty() {
+        eprintln!("[3D PCB] {} pads - showing first 5:", pads.len());
+        for (i, pad) in pads.iter().take(5).enumerate() {
+            eprintln!("  Pad {}: cx={:.2}, cy={:.2}, w={:.2}, h={:.2}, shape='{}', rot={:.1}°, drill={:.2}, poly_pts={}",
+                i, pad.cx, pad.cy, pad.w, pad.h, pad.shape, pad.rotation, pad.drill, pad.poly_pts.len());
+            if !pad.poly_pts.is_empty() {
+                eprintln!("    polygon points: {:?}", pad.poly_pts.iter().take(4).collect::<Vec<_>>());
+            }
+        }
+    }
+
     const MARGIN: f32 = 3.0;
     let pad_half = if pads.is_empty() { 0.0_f32 } else {
         let mx = pads.iter().map(|p| p.cx.abs() + p.w * 0.5).fold(0.0_f32, f32::max);
