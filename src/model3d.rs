@@ -610,12 +610,9 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
         let rad = pad.rotation.to_radians();
         let (rs, rc) = (rad.sin(), rad.cos());
 
-        // Determine slot extent from explicit drill_slot, or derive from pad aspect ratio
-        let slot_major = if pad.drill_slot > 0.0 {
-            pad.drill_slot
-        } else if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
-            if hw >= hh { pad.w } else { pad.h }
-        } else { 0.0 };
+        // Only use slot shape when EasyEDA explicitly provided slot endpoint data.
+        // Oval copper pads can still have a circular drill — don't infer slot from pad size.
+        let slot_major = pad.drill_slot;
 
         if slot_major > pad.drill + 0.01 {
             // Oval slot: half-axis vector along pad's major axis
@@ -722,21 +719,28 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
             let dr = pad.drill * 0.5;  // hole radius in mm
             if pad.npth {
                 // Non-plated through hole: barrel is raw FR4, no copper ring
-                cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.0, -thick, fr4);
-            } else if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
-                // Oval milled slot through-hole
-                let (hole_hw, hole_hh) = if hw <= hh {
-                    (dr, (dr * hh / hw).max(dr))
+                if pad.drill_slot > pad.drill + 0.01 {
+                    slot_hole_barrel(&mut v, pad.cx, pad.cy, pad.drill_slot * 0.5, dr, pad.rotation, 0.0, -thick, fr4);
                 } else {
-                    ((dr * hw / hh).max(dr), dr)
-                };
-                // Oval copper pad on top/bottom, then oval PCB-green punch for the slot opening
+                    cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.0, -thick, fr4);
+                }
+            } else if pad.drill_slot > pad.drill + 0.01 {
+                // Explicit oval milled slot (from EasyEDA holePoints data)
+                let half_slot = pad.drill_slot * 0.5;
+                let (hole_hw, hole_hh) = if hw >= hh { (half_slot, dr) } else { (dr, half_slot) };
+                // Copper pad on top/bottom
                 draw_pad(&mut v, pad, hw, hh, 0.04, pc);
-                draw_pad(&mut v, pad, hole_hw, hole_hh, 0.07, top_green);
                 draw_pad(&mut v, pad, hw, hh, -thick - 0.04, pc);
+                // PCB-green oval punch covering the slot opening
+                draw_pad(&mut v, pad, hole_hw, hole_hh, 0.07, top_green);
                 draw_pad(&mut v, pad, hole_hw, hole_hh, -thick - 0.07, bot_green);
-                // Circular barrel at slot minor radius
-                cylinder_hole(&mut v, pad.cx, pad.cy, hole_hw.min(hole_hh), 0.04, -thick - 0.04, pc);
+                // Proper oval slot barrel (flat walls + semicylinder end-caps)
+                slot_hole_barrel(&mut v, pad.cx, pad.cy, half_slot, dr, pad.rotation, 0.04, -thick - 0.04, pc);
+            } else if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
+                // Oval copper pad with circular drill — draw oval pad + circular barrel
+                draw_pad(&mut v, pad, hw, hh, 0.04, pc);
+                draw_pad(&mut v, pad, hw, hh, -thick - 0.04, pc);
+                cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.04, -thick - 0.04, pc);
             } else {
                 // Circular/rect through-hole: annular ring approach
                 let r_o = hw.max(hh);
@@ -870,6 +874,82 @@ fn cylinder_hole(v: &mut Vec<f32>, cx: f32, cy: f32, r: f32, z_top: f32, z_bot: 
         // Two triangles per segment
         for (p, n) in [(t0,n0),(b0,n0),(b1,n1)] { v.extend_from_slice(&p); v.extend_from_slice(&n); v.extend_from_slice(&c); }
         for (p, n) in [(t0,n0),(b1,n1),(t1,n1)] { v.extend_from_slice(&p); v.extend_from_slice(&n); v.extend_from_slice(&c); }
+    }
+}
+
+// Milled oval-slot barrel: two semicylinder end-caps + two flat walls, inward normals.
+// half_slot = drill_slot * 0.5 (half of total slot length)
+// r         = drill * 0.5      (slot minor radius)
+// rot_deg   = slot rotation
+fn slot_hole_barrel(v: &mut Vec<f32>, cx: f32, cy: f32, half_slot: f32, r: f32, rot_deg: f32, z_top: f32, z_bot: f32, c: [f32; 3]) {
+    let ext = half_slot - r;  // half of straight section
+    let rad = rot_deg.to_radians();
+    let (rs, rc) = (rad.sin(), rad.cos());
+
+    // Along-slot unit vector and perpendicular
+    let (ux, uy) = (rc, rs);   // along major axis
+    let (px, py) = (-rs, rc);  // perpendicular (left side)
+
+    // End centres
+    let (e1x, e1y) = (cx - ext * ux, cy - ext * uy); // -along end
+    let (e2x, e2y) = (cx + ext * ux, cy + ext * uy); // +along end
+
+    let emit = |v: &mut Vec<f32>, pos: [f32;3], nx: f32, ny: f32| {
+        v.extend_from_slice(&pos);
+        v.extend_from_slice(&[nx, ny, 0.0]);
+        v.extend_from_slice(&c);
+    };
+
+    let quad = |v: &mut Vec<f32>, t0: [f32;3], t1: [f32;3], b0: [f32;3], b1: [f32;3], nx: f32, ny: f32| {
+        emit(v, t0, nx, ny); emit(v, b0, nx, ny); emit(v, b1, nx, ny);
+        emit(v, t0, nx, ny); emit(v, b1, nx, ny); emit(v, t1, nx, ny);
+    };
+
+    // Two flat straight walls (along slot axis)
+    // +perp wall (inner normal = -perp)
+    {
+        let (wx, wy) = (px, py);
+        quad(v,
+            [e1x + wx*r, e1y + wy*r, z_top], [e2x + wx*r, e2y + wy*r, z_top],
+            [e1x + wx*r, e1y + wy*r, z_bot], [e2x + wx*r, e2y + wy*r, z_bot],
+            -wx, -wy);
+    }
+    // -perp wall (inner normal = +perp)
+    {
+        let (wx, wy) = (-px, -py);
+        quad(v,
+            [e2x + wx*r, e2y + wy*r, z_top], [e1x + wx*r, e1y + wy*r, z_top],
+            [e2x + wx*r, e2y + wy*r, z_bot], [e1x + wx*r, e1y + wy*r, z_bot],
+            -wx, -wy);
+    }
+
+    // Two semicylinder end-caps (12 segments each)
+    const H: usize = 12;
+    // -along end: angles from rad+PI/2 to rad+3*PI/2 (the cap facing -along)
+    for i in 0..H {
+        let a0 = rad + std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / H as f32;
+        let a1 = rad + std::f32::consts::FRAC_PI_2 + (i+1) as f32 * std::f32::consts::PI / H as f32;
+        let (c0, s0) = (a0.cos(), a0.sin());
+        let (c1, s1) = (a1.cos(), a1.sin());
+        let t0 = [e1x + r*c0, e1y + r*s0, z_top];
+        let t1 = [e1x + r*c1, e1y + r*s1, z_top];
+        let b0 = [e1x + r*c0, e1y + r*s0, z_bot];
+        let b1 = [e1x + r*c1, e1y + r*s1, z_bot];
+        emit(v, t0, -c0, -s0); emit(v, b0, -c0, -s0); emit(v, b1, -c1, -s1);
+        emit(v, t0, -c0, -s0); emit(v, b1, -c1, -s1); emit(v, t1, -c1, -s1);
+    }
+    // +along end: angles from rad-PI/2 to rad+PI/2
+    for i in 0..H {
+        let a0 = rad - std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / H as f32;
+        let a1 = rad - std::f32::consts::FRAC_PI_2 + (i+1) as f32 * std::f32::consts::PI / H as f32;
+        let (c0, s0) = (a0.cos(), a0.sin());
+        let (c1, s1) = (a1.cos(), a1.sin());
+        let t0 = [e2x + r*c0, e2y + r*s0, z_top];
+        let t1 = [e2x + r*c1, e2y + r*s1, z_top];
+        let b0 = [e2x + r*c0, e2y + r*s0, z_bot];
+        let b1 = [e2x + r*c1, e2y + r*s1, z_bot];
+        emit(v, t0, -c0, -s0); emit(v, b0, -c0, -s0); emit(v, b1, -c1, -s1);
+        emit(v, t0, -c0, -s0); emit(v, b1, -c1, -s1); emit(v, t1, -c1, -s1);
     }
 }
 
