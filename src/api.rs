@@ -849,12 +849,15 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
 
     raw.into_iter().map(|(cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee)| {
         // drill field = hole DIAMETER in mm
-        // p[9] is hole RADIUS in EasyEDA units → diameter = hole_r_ee * 2 * SCALE
+        // p[9] = holeRadius in EasyEDA units (1 unit = 0.254mm); diameter = p[9]*2*SCALE
+        // Accept only if result is ≥ 0.2mm (visible) and < 90% of smaller pad dim
+        let fallback = w.min(h) * SCALE * 0.5;
         let drill = if is_tht {
-            if hole_r_ee > 0.0 && hole_r_ee * 2.0 * SCALE < w.min(h) * SCALE {
-                hole_r_ee * 2.0 * SCALE  // actual diameter from EasyEDA data
+            let from_data = hole_r_ee * 2.0 * SCALE;
+            if hole_r_ee > 0.0 && from_data >= 0.2 && from_data < w.min(h) * SCALE * 0.9 {
+                from_data
             } else {
-                w.min(h) * SCALE * 0.5   // fallback: half the smaller pad dimension
+                fallback
             }
         } else { 0.0 };
         Pad {

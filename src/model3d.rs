@@ -661,14 +661,22 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
         let hw = pad.w * 0.5;
         let hh = pad.h * 0.5;
         if pad.drill > 0.0 {
-            let dr  = pad.drill * 0.5;
-            let r_o = hw.max(hh); // outer pad radius
-            // Copper barrel — open cylinder, no caps so hole is see-through
-            cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.0, -thick, pc);
-            // Annular ring pads: inner=drill radius, outer=pad radius
-            // This keeps the hole center genuinely open for see-through
-            ring_y(&mut v, pad.cx, pad.cy, dr, r_o,  0.05,         pc);
-            ring_y(&mut v, pad.cx, pad.cy, dr, r_o, -thick - 0.05, pc);
+            let dr = pad.drill * 0.5;  // hole radius in mm
+            if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
+                // Oval through-hole: draw correct oval copper shape on top/bottom,
+                // then punch a visible drill hole on top of it.
+                draw_pad(&mut v, pad, hw, hh, 0.04, pc);
+                circle_y(&mut v, pad.cx, pad.cy, dr, 0.07, top_green);
+                draw_pad(&mut v, pad, hw, hh, -thick - 0.04, pc);
+                circle_y(&mut v, pad.cx, pad.cy, dr, -thick - 0.07, bot_green);
+                cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.04, -thick - 0.04, pc);
+            } else {
+                // Circular/rect through-hole: annular ring approach
+                let r_o = hw.max(hh);
+                cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.0, -thick, pc);
+                ring_y(&mut v, pad.cx, pad.cy, dr, r_o,  0.05,         pc);
+                ring_y(&mut v, pad.cx, pad.cy, dr, r_o, -thick - 0.05, pc);
+            }
         } else {
             draw_pad(&mut v, pad, hw, hh, 0.05, pc);
         }
