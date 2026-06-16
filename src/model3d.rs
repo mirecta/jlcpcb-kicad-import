@@ -767,9 +767,12 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
                 tri_annular(&outer_ccw, &inner_ccw, 0.04,         false, pc, &mut v);
                 tri_annular(&outer_ccw, &inner_ccw, -thick - 0.04, true,  pc, &mut v);
 
-                // Barrel through the board
+                // Barrel through the board.
+                // For tall-oval pads (hh > hw), the slot runs along Y not X,
+                // so the effective slot rotation is pad.rotation + 90°.
                 if pad.drill_slot > pad.drill + 0.01 {
-                    slot_hole_barrel(&mut v, pad.cx, pad.cy, pad.drill_slot * 0.5, dr, pad.rotation, 0.04, -thick - 0.04, pc);
+                    let slot_rot = if hw >= hh { pad.rotation } else { pad.rotation + 90.0 };
+                    slot_hole_barrel(&mut v, pad.cx, pad.cy, pad.drill_slot * 0.5, dr, slot_rot, 0.04, -thick - 0.04, pc);
                 } else {
                     cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.04, -thick - 0.04, pc);
                 }

@@ -382,11 +382,11 @@ impl eframe::App for App {
                     self.state.val_pos = [0.0, body_min_y - 2.54];
                     // Init 3D model placement from EasyEDA c_origin / c_rotation so the
                     // viewer starts at the same position as KiCad's 3D viewer.
-                    // model_rotation is stored in viewer convention (negated vs KiCad) — see
-                    // build_model_mat; export.rs negates back to KiCad convention on export.
+                    // export.rs negates model_rotation when writing KiCad format, so storing
+                    // c_rotation directly here means the export produces -c_rotation, which
+                    // matches JLC2KiCadLib output (Python also negates c_rotation on export).
                     self.state.model_offset   = comp.model_init_offset;
-                    let ir = comp.model_init_rotation;
-                    self.state.model_rotation = [-ir[0], -ir[1], -ir[2]];
+                    self.state.model_rotation = comp.model_init_rotation;
                     self.state.model_scale    = [1.0, 1.0, 1.0];
                     self.state.model_viewer.reset_view();
                     let pads: Vec<model3d::PadInfo> = comp.pads.iter()
