@@ -54,11 +54,12 @@ pub struct Pad {
     pub cy:     f32,    // centre Y in mm (PCB Y-axis → viewer Z)
     pub w:      f32,
     pub h:      f32,
-    pub number: String, // pad number ("1", "2", "A1", …)
+    pub number: String, // pad number ("1", "2", "A1", …); "" for NPTH
     pub shape:  String, // "oval", "rect", "circle", "polygon"
     pub rotation: f32,  // degrees
     pub drill:      f32,  // 0 = SMD, >0 = drill diameter (or slot minor axis) in mm
     pub drill_slot: f32,  // >0 = oval slot major axis in mm (0 = circular drill)
+    pub npth:   bool,   // true = non-plated through hole (HOLE~ shape)
     pub poly_pts: Vec<[f32; 2]>, // polygon vertices in mm rel. to footprint centre (shape="polygon" only)
 }
 
@@ -915,9 +916,36 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
             rotation,
             drill,
             drill_slot,
+            npth: false,
             poly_pts,
         }
-    }).collect()
+    }).chain(
+        // HOLE~ shapes → NPTH pads (non-plated through holes)
+        shapes.iter().filter_map(|shape| {
+            let s = shape.as_str()?;
+            if !s.starts_with("HOLE~") { return None; }
+            // HOLE~cx~cy~diameter~id
+            let p: Vec<&str> = s.split('~').collect();
+            if p.len() < 4 { return None; }
+            let hcx: f32 = p[1].parse().ok()?;
+            let hcy: f32 = p[2].parse().ok()?;
+            let diam: f32 = p[3].parse().ok()?;
+            if diam <= 0.0 { return None; }
+            let d_mm = diam * SCALE;
+            Some(Pad {
+                cx: (hcx - cx0) * SCALE,
+                cy: (hcy - cy0) * SCALE,
+                w: d_mm, h: d_mm,
+                number: String::new(),
+                shape: "circle".into(),
+                rotation: 0.0,
+                drill: d_mm,
+                drill_slot: 0.0,
+                npth: true,
+                poly_pts: vec![],
+            })
+        })
+    ).collect()
 }
 
 fn ee_layer_to_kicad(layer: i32) -> Option<&'static str> {
@@ -1160,18 +1188,6 @@ fn extract_fp_graphics(easyeda: &serde_json::Value) -> Vec<FpGraphic> {
             let width = if layer == "F.CrtYd" || layer == "B.CrtYd" { 0.05 } else { 0.12 };
             out.push(FpGraphic::Poly { pts, width, layer, fill });
 
-        } else if s.starts_with("HOLE~") {
-            // HOLE~cx~cy~diameter~id  — non-plated through hole, export as Edge.Cuts circle
-            let p: Vec<&str> = s.split('~').collect();
-            if p.len() < 4 { continue; }
-            let ecx: f32 = p[1].parse().unwrap_or(0.0);
-            let ecy: f32 = p[2].parse().unwrap_or(0.0);
-            let diam: f32 = p[3].parse().unwrap_or(0.0);
-            let (cx, cy) = to_mm(ecx, ecy);
-            let r_mm = diam * SCALE * 0.5;
-            if r_mm > 0.0 {
-                out.push(FpGraphic::Circle { cx, cy, r: r_mm, width: 0.05, layer: "Edge.Cuts".into() });
-            }
         }
     }
     out

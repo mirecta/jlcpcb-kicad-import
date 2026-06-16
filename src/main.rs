@@ -393,6 +393,7 @@ impl eframe::App for App {
                                 shape: p.shape.clone(),
                                 drill: p.drill,
                                 drill_slot: p.drill_slot,
+                                npth: p.npth,
                                 rotation: p.rotation,
                                 poly_pts: p.poly_pts.clone(),
                             }
@@ -965,6 +966,7 @@ impl eframe::App for App {
                                                     shape: p.shape.clone(),
                                                     drill: p.drill,
                                                     drill_slot: p.drill_slot,
+                                                    npth: p.npth,
                                                     rotation: p.rotation,
                                                     poly_pts: p.poly_pts.clone(),
                                                 }
@@ -1631,6 +1633,15 @@ fn show_footprint_preview(
     let pad_border = egui::Stroke::new(1.0, egui::Color32::from_rgb(20, 50, 22));
 
     for pad in pads {
+        // NPTH: just draw as a plain hole circle, no copper
+        if pad.npth {
+            let r = pad.drill * 0.5 * scale;
+            let pcx = ts(pad.cx, pad.cy);
+            painter.circle_filled(pcx, r, drill_bg);
+            painter.circle_stroke(pcx, r, egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 60, 0)));
+            continue;
+        }
+
         let hw  = pad.w * 0.5;
         let hh  = pad.h * 0.5;
         let pcx = ts(pad.cx, pad.cy);

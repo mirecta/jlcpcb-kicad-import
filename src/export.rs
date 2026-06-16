@@ -325,6 +325,15 @@ fn build_footprint(
             String::new()
         };
 
+        if pad.npth {
+            // Non-plated through hole
+            pads.push_str(&format!(
+                "  (pad \"\" np_thru_hole circle (at {:.4} {:.4}{}) (size {:.4} {:.4}) (drill {:.4}) (layers \"*.Cu\" \"*.Mask\"))\n",
+                pad.cx, pad.cy, rot_field, pad.w, pad.h, pad.drill,
+            ));
+            continue;
+        }
+
         if pad.drill > 0.0 {
             let hw = pad.w * 0.5;
             let hh = pad.h * 0.5;

@@ -50,6 +50,7 @@ pub struct PadInfo {
     pub shape: String,  // "circle", "rect", "oval", "polygon"
     pub drill:      f32,  // 0 = SMD; >0 = drill diameter (or slot minor axis) in mm
     pub drill_slot: f32,  // >0 = slot major axis in mm (oval slot); 0 = circular drill
+    pub npth:       bool, // non-plated through hole
     pub rotation: f32,    // rotation in degrees
     pub poly_pts: Vec<[f32; 2]>,  // polygon vertices in mm (shape="polygon" only)
 }
@@ -354,7 +355,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, drill_slot: p.drill_slot, rotation: p.rotation, poly_pts: p.poly_pts.clone() })
+                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, drill_slot: p.drill_slot, npth: p.npth, rotation: p.rotation, poly_pts: p.poly_pts.clone() })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -376,7 +377,7 @@ impl ModelViewer {
                 gd.center = mesh.center;
                 gd.radius = mesh.radius;
                 gd.pending_pads = Some(pads.iter()
-                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, drill_slot: p.drill_slot, rotation: p.rotation, poly_pts: p.poly_pts.clone() })
+                    .map(|p| PadInfo { cx: p.cx, cy: p.cy, w: p.w, h: p.h, shape: p.shape.clone(), drill: p.drill, drill_slot: p.drill_slot, npth: p.npth, rotation: p.rotation, poly_pts: p.poly_pts.clone() })
                     .collect());
                 gd.pending_drawings = Some(drawings.iter()
                     .map(|d| PcbDrawing { tris: d.tris.clone(), color: d.color })
@@ -718,7 +719,10 @@ fn build_pcb_body(radius: f32, mesh_xy_half: f32, pads: &[PadInfo], drawings: &[
         let hh = pad.h * 0.5;
         if pad.drill > 0.0 {
             let dr = pad.drill * 0.5;  // hole radius in mm
-            if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
+            if pad.npth {
+                // Non-plated through hole: just a barrel, no copper annular ring
+                cylinder_hole(&mut v, pad.cx, pad.cy, dr, 0.0, -thick, top_green);
+            } else if pad.shape == "oval" && (hw - hh).abs() > 0.1 {
                 // Oval milled slot through-hole
                 let (hole_hw, hole_hh) = if hw <= hh {
                     (dr, (dr * hh / hw).max(dr))
