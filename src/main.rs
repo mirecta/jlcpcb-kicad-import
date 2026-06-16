@@ -124,6 +124,7 @@ struct AppState {
     wrl_bytes: Option<Vec<u8>>,   // VRML 2.0 bytes (converted from EasyEDA OBJ)
     step_bytes: Option<Vec<u8>>,  // raw STEP binary
     symbol_texture: Option<TextureHandle>,
+    fp_preview_tex: Option<TextureHandle>,
 
     // SVG preview pan/zoom
     sym_pz: PanZoom,
@@ -845,6 +846,7 @@ impl eframe::App for App {
                         &comp.fp_graphics,
                         &mut self.state.fp_pz,
                         egui::Vec2::new(460.0, 320.0),
+                        &mut self.state.fp_preview_tex,
                     );
 
                     // Right: attributes table
@@ -1455,43 +1457,211 @@ fn show_symbol_preview(
     }
 }
 
-// Group line segments that share endpoints into polylines.
-// Returns list of point chains; closed = first ≈ last point.
-fn chain_line_segs(segs: &[(f32, f32, f32, f32)]) -> Vec<Vec<(f32, f32)>> {
-    let eps = 0.001_f32; // 1 µm
-    let n = segs.len();
-    let mut used = vec![false; n];
-    let mut chains: Vec<Vec<(f32, f32)>> = Vec::new();
-    for start in 0..n {
-        if used[start] { continue; }
-        used[start] = true;
-        let (x1, y1, x2, y2) = segs[start];
-        let mut chain = vec![(x1, y1), (x2, y2)];
-        // Extend forward from last point
-        'fwd: loop {
-            let (lx, ly) = *chain.last().unwrap();
-            for i in 0..n {
-                if used[i] { continue; }
-                let (ax, ay, bx, by) = segs[i];
-                if (ax - lx).hypot(ay - ly) < eps { used[i] = true; chain.push((bx, by)); continue 'fwd; }
-                if (bx - lx).hypot(by - ly) < eps { used[i] = true; chain.push((ax, ay)); continue 'fwd; }
-            }
-            break;
+// Render footprint to a tiny-skia pixmap — proper anti-aliased strokes with round caps/joins.
+fn render_fp_pixmap(
+    pads: &[api::Pad],
+    graphics: &[api::FpGraphic],
+    pw: u32, ph: u32,
+    scale: f32,
+    cx_mm: f32, cy_mm: f32,
+    ox: f32, oy: f32,
+) -> Option<tiny_skia::Pixmap> {
+    let mut pix = tiny_skia::Pixmap::new(pw.max(1), ph.max(1))?;
+    pix.fill(tiny_skia::Color::from_rgba8(20, 50, 22, 255));
+
+    let xf = tiny_skia::Transform::identity();
+    let tx = |mx: f32| -> f32 { ox + (mx - cx_mm) * scale };
+    let ty = |my: f32| -> f32 { oy + (my - cy_mm) * scale };
+
+    let layer_rgb = |layer: &str| -> (u8, u8, u8) {
+        match layer {
+            "F.SilkS"|"B.SilkS" => (200,200,200),
+            "F.CrtYd"|"B.CrtYd" => (255,210,  0),
+            "F.Fab"  |"B.Fab"   => (120, 90, 40),
+            "F.Cu"   |"B.Cu"    => (185,140, 10),
+            "Edge.Cuts"         => (255,255,  0),
+            "Cmts.User"         => (100,120,160),
+            _                   => ( 90, 90, 90),
         }
-        // Extend backward from first point
-        'bwd: loop {
-            let (fx, fy) = chain[0];
-            for i in 0..n {
-                if used[i] { continue; }
-                let (ax, ay, bx, by) = segs[i];
-                if (ax - fx).hypot(ay - fy) < eps { used[i] = true; chain.insert(0, (bx, by)); continue 'bwd; }
-                if (bx - fx).hypot(by - fy) < eps { used[i] = true; chain.insert(0, (ax, ay)); continue 'bwd; }
+    };
+
+    let mk = |r:u8,g:u8,b:u8,a:u8| {
+        let mut p = tiny_skia::Paint::default();
+        p.set_color(tiny_skia::Color::from_rgba8(r,g,b,a));
+        p.anti_alias = true;
+        p
+    };
+
+    // ── Graphics, back layers first ──────────────────────────────────────
+    for &pass in &["Edge.Cuts","Cmts.User","B.Cu","F.Cu",
+                   "B.Fab","F.Fab","B.CrtYd","F.CrtYd","B.SilkS","F.SilkS"] {
+        let (r,g,b) = layer_rgb(pass);
+        let paint = mk(r,g,b,255);
+
+        for gfx in graphics {
+            let (g_layer, g_width) = match gfx {
+                api::FpGraphic::Line  {layer,width,..} => (layer.as_str(),*width),
+                api::FpGraphic::Circle{layer,width,..} => (layer.as_str(),*width),
+                api::FpGraphic::Poly  {layer,width,..} => (layer.as_str(),*width),
+                api::FpGraphic::Arc   {layer,width,..} => (layer.as_str(),*width),
+            };
+            if g_layer != pass { continue; }
+            let sw = (g_width * scale).max(1.0);
+            let stk = tiny_skia::Stroke {
+                width: sw,
+                line_cap:  tiny_skia::LineCap::Round,
+                line_join: tiny_skia::LineJoin::Round,
+                ..Default::default()
+            };
+
+            match gfx {
+                api::FpGraphic::Line { x1,y1,x2,y2,.. } => {
+                    let mut pb = tiny_skia::PathBuilder::new();
+                    pb.move_to(tx(*x1), ty(*y1));
+                    pb.line_to(tx(*x2), ty(*y2));
+                    if let Some(p) = pb.finish() {
+                        pix.stroke_path(&p, &paint, &stk, xf, None);
+                    }
+                }
+                api::FpGraphic::Circle { cx,cy,r,.. } => {
+                    if let Some(p) = tiny_skia::PathBuilder::from_circle(tx(*cx), ty(*cy), (r*scale).max(0.5)) {
+                        pix.stroke_path(&p, &paint, &stk, xf, None);
+                    }
+                }
+                api::FpGraphic::Poly { pts, fill, .. } if pts.len() >= 2 => {
+                    let mut pb = tiny_skia::PathBuilder::new();
+                    pb.move_to(tx(pts[0][0]), ty(pts[0][1]));
+                    for pt in &pts[1..] { pb.line_to(tx(pt[0]), ty(pt[1])); }
+                    pb.close();
+                    if let Some(p) = pb.finish() {
+                        if *fill {
+                            pix.fill_path(&p, &mk(r,g,b,50), tiny_skia::FillRule::Winding, xf, None);
+                        }
+                        pix.stroke_path(&p, &paint, &stk, xf, None);
+                    }
+                }
+                api::FpGraphic::Arc { start,mid,end,.. } => {
+                    let (ax,ay)=(start[0],start[1]); let (bx,by)=(mid[0],mid[1]); let (ex,ey)=(end[0],end[1]);
+                    let d = 2.0*(ax*(by-ey)+bx*(ey-ay)+ex*(ay-by));
+                    if d.abs() > 1e-8 {
+                        let (a2v,b2v,e2v) = (ax*ax+ay*ay, bx*bx+by*by, ex*ex+ey*ey);
+                        let ocx=(a2v*(by-ey)+b2v*(ey-ay)+e2v*(ay-by))/d;
+                        let ocy=(a2v*(ex-bx)+b2v*(ax-ex)+e2v*(bx-ax))/d;
+                        let arc_r=((ax-ocx)*(ax-ocx)+(ay-ocy)*(ay-ocy)).sqrt();
+                        let a1=(ay-ocy).atan2(ax-ocx); let am=(by-ocy).atan2(bx-ocx); let a2e=(ey-ocy).atan2(ex-ocx);
+                        let norm=|a:f32|{let mut v=a;while v<0.0{v+=std::f32::consts::TAU;}v%std::f32::consts::TAU};
+                        let sweep={let dm=norm(am-a1);let de=norm(a2e-a1);if dm<de{de}else{de-std::f32::consts::TAU}};
+                        let n=((arc_r*scale*sweep.abs()/4.0) as usize).clamp(4,256);
+                        let mut pb = tiny_skia::PathBuilder::new();
+                        for i in 0..=n {
+                            let a = a1 + sweep*(i as f32/n as f32);
+                            let (ppx,ppy) = (tx(ocx+arc_r*a.cos()), ty(ocy+arc_r*a.sin()));
+                            if i==0 { pb.move_to(ppx,ppy); } else { pb.line_to(ppx,ppy); }
+                        }
+                        if let Some(p) = pb.finish() { pix.stroke_path(&p, &paint, &stk, xf, None); }
+                    }
+                }
+                _ => {}
             }
-            break;
         }
-        chains.push(chain);
     }
-    chains
+
+    // ── Pads ─────────────────────────────────────────────────────────────
+    let copper_p = mk(185,140, 10,255);
+    let drill_p  = mk( 50, 35, 15,255);
+    let ring_p   = mk( 90, 65, 25,255);
+    let thin_stk = tiny_skia::Stroke { width: 1.0, ..Default::default() };
+
+    for pad in pads {
+        let hw=pad.w*0.5; let hh=pad.h*0.5;
+        let pcx=tx(pad.cx); let pcy=ty(pad.cy);
+        let rad=pad.rotation.to_radians();
+        let (sn,cs)=(rad.sin(),rad.cos());
+        let rpt=|lx:f32,ly:f32|->(f32,f32){ (tx(pad.cx+lx*cs-ly*sn), ty(pad.cy+lx*sn+ly*cs)) };
+
+        // NPTH: hole only
+        if pad.npth {
+            let r=(pad.drill*0.5*scale).max(0.5);
+            if let Some(p)=tiny_skia::PathBuilder::from_circle(pcx,pcy,r){
+                pix.fill_path(&p,&drill_p,tiny_skia::FillRule::Winding,xf,None);
+                pix.stroke_path(&p,&ring_p,&thin_stk,xf,None);
+            }
+            continue;
+        }
+
+        // Copper pad shape
+        match pad.shape.as_str() {
+            "oval" => {
+                let diff=hw-hh;
+                if diff.abs()<0.01 {
+                    if let Some(p)=tiny_skia::PathBuilder::from_circle(pcx,pcy,(hw*scale).max(0.5)){
+                        pix.fill_path(&p,&copper_p,tiny_skia::FillRule::Winding,xf,None);
+                    }
+                } else {
+                    // Pill = fat stroked line with round caps
+                    let (c1,c2) = if diff>0.0 { (rpt(-diff,0.0), rpt(diff,0.0)) }
+                                  else        { (rpt(0.0,diff.abs()), rpt(0.0,-diff.abs())) };
+                    let minor=(hw.min(hh)*scale).max(0.5);
+                    let mut pb=tiny_skia::PathBuilder::new();
+                    pb.move_to(c1.0,c1.1); pb.line_to(c2.0,c2.1);
+                    if let Some(p)=pb.finish(){
+                        pix.stroke_path(&p,&copper_p,&tiny_skia::Stroke{width:minor*2.0,line_cap:tiny_skia::LineCap::Round,..Default::default()},xf,None);
+                    }
+                }
+            }
+            "polygon" if pad.poly_pts.len()>=3 => {
+                let mut pb=tiny_skia::PathBuilder::new();
+                pb.move_to(tx(pad.poly_pts[0][0]),ty(pad.poly_pts[0][1]));
+                for pt in &pad.poly_pts[1..] { pb.line_to(tx(pt[0]),ty(pt[1])); }
+                pb.close();
+                if let Some(p)=pb.finish(){ pix.fill_path(&p,&copper_p,tiny_skia::FillRule::Winding,xf,None); }
+            }
+            "rect" => {
+                let corners=[rpt(-hw,-hh),rpt(hw,-hh),rpt(hw,hh),rpt(-hw,hh)];
+                let mut pb=tiny_skia::PathBuilder::new();
+                pb.move_to(corners[0].0,corners[0].1);
+                for &(x,y) in &corners[1..] { pb.line_to(x,y); }
+                pb.close();
+                if let Some(p)=pb.finish(){ pix.fill_path(&p,&copper_p,tiny_skia::FillRule::Winding,xf,None); }
+            }
+            _ => {
+                if let Some(p)=tiny_skia::PathBuilder::from_circle(pcx,pcy,(hw.max(hh)*scale).max(0.5)){
+                    pix.fill_path(&p,&copper_p,tiny_skia::FillRule::Winding,xf,None);
+                }
+            }
+        }
+
+        // Drill / slot hole
+        if pad.drill > 0.0 {
+            let hr = pad.drill*0.5;
+            let is_slot = pad.drill_slot > pad.drill+0.05
+                       || (pad.shape=="oval" && (hw-hh).abs()>0.05);
+            if is_slot {
+                let half_slot = if pad.drill_slot > pad.drill+0.05 { pad.drill_slot*0.5 }
+                                else { hr*(hw.max(hh)/hw.min(hh).max(0.001)) };
+                let ext=(half_slot-hr).max(0.0);
+                // slot axis: along major axis of pad, rotated by pad.rotation
+                let (dux,duy)=if hw>=hh{(cs,sn)}else{(-sn,cs)};
+                let c1=(tx(pad.cx-ext*dux),ty(pad.cy-ext*duy));
+                let c2=(tx(pad.cx+ext*dux),ty(pad.cy+ext*duy));
+                let mut pb=tiny_skia::PathBuilder::new();
+                pb.move_to(c1.0,c1.1); pb.line_to(c2.0,c2.1);
+                if let Some(p)=pb.finish(){
+                    let fw=(hr*scale*2.0).max(1.0);
+                    pix.stroke_path(&p,&ring_p, &tiny_skia::Stroke{width:fw+2.0,line_cap:tiny_skia::LineCap::Round,..Default::default()},xf,None);
+                    pix.stroke_path(&p,&drill_p,&tiny_skia::Stroke{width:fw,    line_cap:tiny_skia::LineCap::Round,..Default::default()},xf,None);
+                }
+            } else {
+                let r=(hr*scale).max(0.5);
+                if let Some(p)=tiny_skia::PathBuilder::from_circle(pcx,pcy,r){
+                    pix.fill_path(&p,&drill_p,tiny_skia::FillRule::Winding,xf,None);
+                    pix.stroke_path(&p,&ring_p,&thin_stk,xf,None);
+                }
+            }
+        }
+    }
+
+    Some(pix)
 }
 
 fn show_footprint_preview(
@@ -1500,6 +1670,7 @@ fn show_footprint_preview(
     graphics: &[api::FpGraphic],
     pz: &mut PanZoom,
     display_size: egui::Vec2,
+    tex: &mut Option<egui::TextureHandle>,
 ) {
     let (rect, response) = ui.allocate_exact_size(display_size, egui::Sense::click_and_drag());
 
@@ -1568,286 +1739,30 @@ fn show_footprint_preview(
         center.y + (my - cy_mm) * scale,
     );
 
-    let layer_color = |layer: &str| -> egui::Color32 {
-        match layer {
-            "F.SilkS" | "B.SilkS" => egui::Color32::from_rgb(200, 200, 200),
-            "F.CrtYd" | "B.CrtYd" => egui::Color32::from_rgb(255, 210, 0),
-            "F.Fab"   | "B.Fab"   => egui::Color32::from_rgb(120, 90, 40),
-            "F.Cu"    | "B.Cu"    => egui::Color32::from_rgb(185, 140, 10),
-            "Edge.Cuts"           => egui::Color32::from_rgb(255, 255, 0),
-            "Cmts.User"           => egui::Color32::from_rgb(100, 120, 160),
-            _ => egui::Color32::from_gray(90),
-        }
-    };
+    // Render footprint via tiny-skia into a pixmap, display as texture
+    let pw = (rect.width()  as u32).max(1);
+    let ph = (rect.height() as u32).max(1);
+    let ox = center.x - rect.min.x;
+    let oy = center.y - rect.min.y;
 
-    // Draw graphics: back layers first, silkscreen on top
-    for pass in &["Edge.Cuts", "Cmts.User", "B.Cu", "F.Cu",
-                  "B.Fab", "F.Fab", "B.CrtYd", "F.CrtYd", "B.SilkS", "F.SilkS"] {
-        let col = layer_color(pass);
-
-        // --- Lines: group connected segments into polylines for proper joins ---
-        // Collect all lines on this layer, keyed by width bucket
-        let mut width_groups: std::collections::HashMap<u32, Vec<(f32,f32,f32,f32)>> =
-            std::collections::HashMap::new();
-        for g in graphics.iter() {
-            if let api::FpGraphic::Line { x1, y1, x2, y2, layer, width } = g {
-                if layer.as_str() == *pass {
-                    let wk = (width * 1000.0) as u32;
-                    width_groups.entry(wk).or_default().push((*x1, *y1, *x2, *y2));
-                }
-            }
-        }
-        for (wk, segs) in &width_groups {
-            let pw = (*wk as f32 / 1000.0 * scale).max(1.0);
-            let stroke = egui::epaint::PathStroke::new(pw, col);
-            for chain in chain_line_segs(segs) {
-                let pts: Vec<egui::Pos2> = chain.iter().map(|&(x, y)| ts(x, y)).collect();
-                if pts.len() < 2 { continue; }
-                let closed = {
-                    let f = pts[0]; let l = *pts.last().unwrap();
-                    (f.x - l.x).hypot(f.y - l.y) < 2.0
-                };
-                painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                    points: pts,
-                    closed,
-                    fill: egui::Color32::TRANSPARENT,
-                    stroke: stroke.clone(),
-                }));
-            }
-        }
-
-        // --- Non-line graphics ---
-        for g in graphics {
-            let (g_layer, g_width) = match g {
-                api::FpGraphic::Line  { layer, width, .. } => (layer.as_str(), *width),
-                api::FpGraphic::Circle{ layer, width, .. } => (layer.as_str(), *width),
-                api::FpGraphic::Poly  { layer, width, .. } => (layer.as_str(), *width),
-                api::FpGraphic::Arc   { layer, width, .. } => (layer.as_str(), *width),
-            };
-            if g_layer != *pass { continue; }
-            if matches!(g, api::FpGraphic::Line { .. }) { continue; } // already drawn above
-            let pw  = (g_width * scale).max(1.0);
-            match g {
-                api::FpGraphic::Line { .. } => { /* handled above */ }
-                api::FpGraphic::Circle { cx, cy, r, .. } => {
-                    painter.circle_stroke(ts(*cx, *cy), r * scale, egui::Stroke::new(pw, col));
-                }
-                api::FpGraphic::Poly { pts, fill, .. } => {
-                    if pts.len() >= 2 {
-                        let spts: Vec<egui::Pos2> = pts.iter().map(|p| ts(p[0], p[1])).collect();
-                        let fill_col = if *fill {
-                            let c = col.to_array();
-                            egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 60)
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        };
-                        painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                            points: spts,
-                            closed: true,
-                            fill: fill_col,
-                            stroke: egui::epaint::PathStroke::new(pw, col),
-                        }));
-                    }
-                }
-                api::FpGraphic::Arc { start, mid, end, .. } => {
-                    // Compute circle centre from 3 arc points (circumcircle)
-                    let (ax, ay) = (start[0], start[1]);
-                    let (bx, by) = (mid[0],   mid[1]);
-                    let (ex, ey) = (end[0],   end[1]);
-                    let d = 2.0 * (ax*(by-ey) + bx*(ey-ay) + ex*(ay-by));
-                    let stroke = egui::Stroke::new(pw, col);
-                    if d.abs() < 1e-8 {
-                        // Collinear — just draw two segments
-                        painter.line_segment([ts(ax,ay), ts(bx,by)], stroke);
-                        painter.line_segment([ts(bx,by), ts(ex,ey)], stroke);
-                    } else {
-                        let a2 = ax*ax + ay*ay;
-                        let b2 = bx*bx + by*by;
-                        let e2 = ex*ex + ey*ey;
-                        let ocx = (a2*(by-ey) + b2*(ey-ay) + e2*(ay-by)) / d;
-                        let ocy = (a2*(ex-bx) + b2*(ax-ex) + e2*(bx-ax)) / d;
-                        let r   = ((ax-ocx)*(ax-ocx) + (ay-ocy)*(ay-ocy)).sqrt();
-
-                        let a1 = (ay-ocy).atan2(ax-ocx);
-                        let am = (by-ocy).atan2(bx-ocx);
-                        let a2 = (ey-ocy).atan2(ex-ocx);
-
-                        // Determine sweep direction: which arc from a1→a2 passes through mid?
-                        let norm = |a: f32| { let mut v = a; while v < 0.0 { v += std::f32::consts::TAU; } v % std::f32::consts::TAU };
-                        let da_mid = norm(am - a1);
-                        let da_end = norm(a2 - a1);
-                        let sweep = if da_mid < da_end { da_end } else { da_end - std::f32::consts::TAU };
-
-                        // Number of segments proportional to arc length on screen
-                        let arc_px = r * scale * sweep.abs();
-                        let n = ((arc_px / 4.0) as usize).clamp(4, 128);
-
-                        let pts: Vec<egui::Pos2> = (0..=n).map(|i| {
-                            let angle = a1 + sweep * (i as f32 / n as f32);
-                            ts(ocx + r * angle.cos(), ocy + r * angle.sin())
-                        }).collect();
-                        // Draw as a single open PathShape — proper joins + round end caps
-                        painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                            points: pts,
-                            closed: false,
-                            fill: egui::Color32::TRANSPARENT,
-                            stroke: egui::epaint::PathStroke::new(pw, col),
-                        }));
-                    }
-                }
-            }
-        }
+    if let Some(pixmap) = render_fp_pixmap(pads, graphics, pw, ph, scale, cx_mm, cy_mm, ox, oy) {
+        let img = egui::ColorImage::from_rgba_unmultiplied(
+            [pw as usize, ph as usize], pixmap.data());
+        *tex = Some(ui.ctx().load_texture("fp_preview", img, egui::TextureOptions::LINEAR));
+    }
+    if let Some(t) = tex.as_ref() {
+        painter.image(t.id(), rect,
+            egui::Rect::from_min_max(egui::pos2(0.0,0.0), egui::pos2(1.0,1.0)),
+            egui::Color32::WHITE);
     }
 
-    // Draw pads — copper colored with rotation support
-    let copper     = egui::Color32::from_rgb(185, 140, 10);
-    let drill_bg   = egui::Color32::from_rgb(50, 35, 15);   // FR4 brown — distinct from PCB green
-    let drill_ring = egui::Color32::from_rgb(90, 65, 25);
-    let num_col    = egui::Color32::from_rgb(30, 20, 0);
-    let font_sz    = (scale * 0.7).clamp(7.0, 12.0);
-    // Thin dark border makes close-pitch pads visually distinct
-    let pad_border = egui::Stroke::new(1.0, egui::Color32::from_rgb(20, 50, 22));
-
-    for pad in pads {
-        // NPTH: just draw as a plain hole circle, no copper
-        if pad.npth {
-            let r = pad.drill * 0.5 * scale;
-            let pcx = ts(pad.cx, pad.cy);
-            painter.circle_filled(pcx, r, drill_bg);
-            painter.circle_stroke(pcx, r, egui::Stroke::new(1.0, drill_ring));
-            continue;
-        }
-
-        let hw  = pad.w * 0.5;
-        let hh  = pad.h * 0.5;
-        let pcx = ts(pad.cx, pad.cy);
-        let rad = pad.rotation.to_radians();
-        let (sn, cs) = (rad.sin(), rad.cos());
-
-        // Rotate local-space point to world, then to screen
-        let rot_pt = |lx: f32, ly: f32| egui::pos2(
-            center.x + (pad.cx + lx * cs - ly * sn - cx_mm) * scale,
-            center.y + (pad.cy + lx * sn + ly * cs - cy_mm) * scale,
-        );
-
-        match pad.shape.as_str() {
-            "rect" => {
-                let corners = vec![
-                    rot_pt(-hw, -hh), rot_pt(hw, -hh),
-                    rot_pt(hw,  hh),  rot_pt(-hw, hh),
-                ];
-                painter.add(egui::Shape::convex_polygon(corners, copper, pad_border));
-            }
-            "oval" => {
-                // Draw as pill: filled rect + two filled end circles, no seam outline
-                let diff = hw - hh;
-                if diff.abs() < 0.01 {
-                    // Circular
-                    painter.circle_filled(pcx, hw * scale, copper);
-                } else if diff > 0.0 {
-                    // Wider than tall: pill along X
-                    let c1 = rot_pt(-diff, 0.0);
-                    let c2 = rot_pt( diff, 0.0);
-                    painter.add(egui::Shape::convex_polygon(
-                        vec![rot_pt(-diff,-hh), rot_pt(diff,-hh), rot_pt(diff,hh), rot_pt(-diff,hh)],
-                        copper, egui::Stroke::NONE));
-                    painter.circle_filled(c1, hh * scale, copper);
-                    painter.circle_filled(c2, hh * scale, copper);
-                } else {
-                    // Taller than wide: pill along Y
-                    let ext = hh - hw;
-                    let c1 = rot_pt(0.0, -ext);
-                    let c2 = rot_pt(0.0,  ext);
-                    painter.add(egui::Shape::convex_polygon(
-                        vec![rot_pt(-hw,-ext), rot_pt(hw,-ext), rot_pt(hw,ext), rot_pt(-hw,ext)],
-                        copper, egui::Stroke::NONE));
-                    painter.circle_filled(c1, hw * scale, copper);
-                    painter.circle_filled(c2, hw * scale, copper);
-                }
-            }
-            "polygon" => {
-                if pad.poly_pts.len() >= 3 {
-                    let pts: Vec<egui::Pos2> = pad.poly_pts.iter()
-                        .map(|p| ts(p[0], p[1]))
-                        .collect();
-                    painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                        points: pts,
-                        closed: true,
-                        fill: copper,
-                        stroke: egui::epaint::PathStroke::new(1.0, egui::Color32::from_rgb(20, 50, 22)),
-                    }));
-                }
-            }
-            _ => {
-                // circle
-                let r = hw.max(hh) * scale;
-                painter.circle_filled(pcx, r, copper);
-                painter.circle_stroke(pcx, r, pad_border);
-            }
-        }
-
-        if pad.drill > 0.0 {
-            // Hole radius in mm
-            let hr = pad.drill * 0.5;
-            let ring_col = drill_ring;
-            // Compute oval slot hole half-dimensions
-            let is_slot = pad.drill_slot > pad.drill + 0.05
-                       || (pad.shape == "oval" && (hw - hh).abs() > 0.05);
-            let (hole_hw_opt, hole_hh_opt) = if is_slot {
-                if pad.drill_slot > pad.drill + 0.05 {
-                    // Explicit slot dimensions
-                    if hw >= hh {
-                        (Some(pad.drill_slot * 0.5), Some(hr))
-                    } else {
-                        (Some(hr), Some(pad.drill_slot * 0.5))
-                    }
-                } else {
-                    // Derive from pad aspect ratio
-                    if hw >= hh {
-                        (Some(hr * hw / hh.max(0.001)), Some(hr))
-                    } else {
-                        (Some(hr), Some(hr * hh / hw.max(0.001)))
-                    }
-                }
-            } else { (None, None) };
-            if let (Some(hole_hw), Some(hole_hh)) = (hole_hw_opt, hole_hh_opt) {
-                // Oval slot hole
-                let draw_oval = |v: &mut dyn FnMut(egui::Shape), col: egui::Color32, hw2: f32, hh2: f32| {
-                    let diff2 = hw2 - hh2;
-                    if diff2.abs() < 0.01 {
-                        v(egui::Shape::circle_filled(pcx, hw2 * scale, col));
-                    } else if diff2 > 0.0 {
-                        let ext2 = diff2;
-                        let pts = vec![rot_pt(-ext2,-hh2), rot_pt(ext2,-hh2),
-                                       rot_pt( ext2, hh2), rot_pt(-ext2, hh2)];
-                        v(egui::Shape::convex_polygon(pts, col, egui::Stroke::NONE));
-                        v(egui::Shape::circle_filled(rot_pt(-ext2, 0.0), hh2 * scale, col));
-                        v(egui::Shape::circle_filled(rot_pt( ext2, 0.0), hh2 * scale, col));
-                    } else {
-                        let ext2 = hh2 - hw2;
-                        let pts = vec![rot_pt(-hw2,-ext2), rot_pt(hw2,-ext2),
-                                       rot_pt( hw2, ext2), rot_pt(-hw2, ext2)];
-                        v(egui::Shape::convex_polygon(pts, col, egui::Stroke::NONE));
-                        v(egui::Shape::circle_filled(rot_pt(0.0, -ext2), hw2 * scale, col));
-                        v(egui::Shape::circle_filled(rot_pt(0.0,  ext2), hw2 * scale, col));
-                    }
-                };
-                let mut shapes_out = Vec::new();
-                draw_oval(&mut |s| shapes_out.push(s), drill_bg, hole_hw, hole_hh);
-                for s in shapes_out { painter.add(s); }
-                // Thin outline ring
-                let mut shapes_out = Vec::new();
-                draw_oval(&mut |s| shapes_out.push(s), ring_col, hole_hw + 0.05, hole_hh + 0.05);
-                // Don't draw outline for slot holes (looks noisy at small scale)
-            } else {
-                let dr = hr * scale;
-                painter.circle_filled(pcx, dr, drill_bg);
-                painter.circle_stroke(pcx, dr, egui::Stroke::new(1.0, ring_col));
-            }
-        }
-
-        if font_sz >= 7.0 {
-            painter.text(pcx, egui::Align2::CENTER_CENTER, &pad.number,
+    // Pad numbers drawn on top via egui (tiny-skia has no text)
+    let num_col = egui::Color32::from_rgb(30, 20, 0);
+    let font_sz = (scale * 0.7).clamp(7.0, 12.0);
+    if font_sz >= 7.0 {
+        for pad in pads {
+            if pad.number.is_empty() || pad.npth { continue; }
+            painter.text(ts(pad.cx, pad.cy), egui::Align2::CENTER_CENTER, &pad.number,
                 egui::FontId::proportional(font_sz), num_col);
         }
     }
