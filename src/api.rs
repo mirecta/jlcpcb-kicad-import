@@ -834,9 +834,13 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
         let is_tht = layer == "11";
 
         let kicad_shape = match ee_shape.to_uppercase().as_str() {
-            "OVAL" | "ELLIPSE" => "oval",
-            "RECT"             => "rect",
-            _                  => "circle",
+            "OVAL" | "ELLIPSE" | "OBLONG" => "oval",
+            "RECT" | "RECTANGLE"          => "rect",
+            _ => {
+                // Catch-all: if dimensions are clearly asymmetric, treat as oval
+                // (EasyEDA may use undocumented shape names for oval/slot pads)
+                if (w - h).abs() > w.min(h) * 0.15 { "oval" } else { "circle" }
+            }
         };
 
         raw.push((cx, cy, w, h, number, kicad_shape.to_string(), rotation, is_tht, hole_r_ee));
