@@ -285,63 +285,79 @@ impl App {
 
         self.spawn(move |tx| {
             use std::fs;
-            use std::path::Path;
 
+            let paths = export::LibPaths::new(&lib_path, &lib_name);
+
+            // Symbol library is the master list — scan it for all LCSC IDs
+            let sym_content = match fs::read_to_string(&paths.sym_file) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(BgMsg::RefreshErr(format!("Library file not found: {}", e)));
+                    return;
+                }
+            };
+
+            let lcsc_ids = extract_lcsc_ids(&sym_content);
+            let total = lcsc_ids.len();
+            if total == 0 {
+                let _ = tx.send(BgMsg::RefreshErr("No components with LCSC IDs found in symbol library".to_string()));
+                return;
+            }
+
+            let mut updated_sym = sym_content.clone();
             let mut updated_count = 0;
             let mut failed_count = 0;
 
-            if opts.symbols {
-                let sym_file = Path::new(&lib_path).join(format!("{}.kicad_sym", lib_name));
+            for (i, lcsc_id) in lcsc_ids.iter().enumerate() {
+                let _ = tx.send(BgMsg::RefreshProgress(i + 1, total));
 
-                if !sym_file.exists() {
-                    let _ = tx.send(BgMsg::RefreshErr(format!("Library file not found: {}", sym_file.display())));
-                    return;
-                }
-
-                let content = match fs::read_to_string(&sym_file) {
+                let comp = match api::fetch_component(lcsc_id) {
                     Ok(c) => c,
-                    Err(e) => {
-                        let _ = tx.send(BgMsg::RefreshErr(format!("Failed to read library: {}", e)));
-                        return;
-                    }
+                    Err(_) => { failed_count += 1; continue; }
                 };
 
-                let lcsc_ids = extract_lcsc_ids(&content);
-                let total = lcsc_ids.len();
-
-                if total == 0 {
-                    let _ = tx.send(BgMsg::RefreshErr("No components with LCSC IDs found".to_string()));
-                    return;
+                if opts.symbols {
+                    updated_sym = update_component_in_lib(
+                        &updated_sym, lcsc_id, &comp,
+                        opts.keep_sym_labels, &lib_name,
+                        hide_pin_numbers, hide_pin_names,
+                    );
                 }
 
-                let mut updated_content = content.clone();
-
-                for (i, lcsc_id) in lcsc_ids.iter().enumerate() {
-                    let _ = tx.send(BgMsg::RefreshProgress(i + 1, total));
-
-                    match api::fetch_component(lcsc_id) {
-                        Ok(comp) => {
-                            updated_content = update_component_in_lib(
-                                &updated_content, lcsc_id, &comp,
-                                opts.keep_sym_labels, &lib_name,
-                                hide_pin_numbers, hide_pin_names,
-                            );
-                            updated_count += 1;
+                if opts.footprints {
+                    let pkg = export::package_name(&comp);
+                    let fp_path = paths.fp_dir.join(format!("{}.kicad_mod", pkg));
+                    let (offset, rotation, scale) = if opts.keep_3d_settings {
+                        if let Ok(existing) = fs::read_to_string(&fp_path) {
+                            extract_3d_settings(&existing)
+                        } else {
+                            ([0.0f32;3], [0.0f32;3], [1.0f32,1.0,1.0])
                         }
-                        Err(_) => {
-                            failed_count += 1;
-                        }
+                    } else {
+                        ([0.0f32;3], [0.0f32;3], [1.0f32,1.0,1.0])
+                    };
+                    let model_ext = if paths.model_dir.join(format!("{}.wrl", pkg)).exists() { "wrl" } else { "step" };
+                    let _ = export::write_footprint(&paths, &comp, &lib_name, offset, rotation, scale, model_ext);
+                }
+
+                if opts.models_3d {
+                    if let Some(wrl) = comp.wrl_url.as_deref().and_then(|u| api::download_wrl(u)) {
+                        let _ = export::write_wrl_model(&paths, &comp, &wrl);
+                    }
+                    if let Some(step) = comp.step_url.as_deref().and_then(|u| api::download_bytes(u).ok()) {
+                        let _ = export::write_step_model(&paths, &comp, &step);
                     }
                 }
 
-                if let Err(e) = fs::write(&sym_file, updated_content) {
-                    let _ = tx.send(BgMsg::RefreshErr(format!("Failed to write library: {}", e)));
+                updated_count += 1;
+            }
+
+            if opts.symbols {
+                if let Err(e) = fs::write(&paths.sym_file, updated_sym) {
+                    let _ = tx.send(BgMsg::RefreshErr(format!("Failed to write symbol library: {}", e)));
                     return;
                 }
             }
-
-            // Footprints and 3D model refresh: placeholders for future implementation
-            // opts.footprints / opts.models_3d / opts.keep_3d_settings
 
             let _ = tx.send(BgMsg::RefreshDone(updated_count, failed_count));
         });
@@ -2043,6 +2059,30 @@ fn update_component_in_lib(
     export::replace_symbol_in_lib(content, &name, &new_sym)
 }
 
+
+
+fn extract_3d_settings(content: &str) -> ([f32;3], [f32;3], [f32;3]) {
+    let parse_xyz = |label: &str| -> [f32;3] {
+        for line in content.lines() {
+            if line.contains(label) {
+                if let Some(s) = line.find("(xyz ") {
+                    let after = &line[s + 5..];
+                    if let Some(e) = after.find(')') {
+                        let nums: Vec<f32> = after[..e].split_whitespace()
+                            .filter_map(|v| v.parse().ok()).collect();
+                        if nums.len() >= 3 { return [nums[0], nums[1], nums[2]]; }
+                    }
+                }
+            }
+        }
+        [0.0; 3]
+    };
+    let offset   = parse_xyz("(offset");
+    let scale_raw = parse_xyz("(scale");
+    let scale    = if scale_raw == [0.0;3] { [1.0,1.0,1.0] } else { scale_raw };
+    let rotation = parse_xyz("(rotate");
+    (offset, rotation, scale)
+}
 
 fn main() -> eframe::Result<()> {
     // Parse command-line arguments
