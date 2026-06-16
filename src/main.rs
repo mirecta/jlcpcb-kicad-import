@@ -1624,9 +1624,48 @@ fn show_footprint_preview(
         }
 
         if pad.drill > 0.0 {
-            let dr = pad.drill * 0.5 * scale;
-            painter.circle_filled(pcx, dr, drill_bg);
-            painter.circle_stroke(pcx, dr, egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 60, 0)));
+            // Hole radius in mm
+            let hr = pad.drill * 0.5;
+            let ring_col = egui::Color32::from_rgb(80, 60, 0);
+            if pad.shape == "oval" && (hw - hh).abs() > 0.05 {
+                // Oval slot hole: match pad's aspect ratio
+                let (hole_hw, hole_hh) = if hw >= hh {
+                    (hr * hw / hh, hr)
+                } else {
+                    (hr, hr * hh / hw)
+                };
+                let draw_oval = |v: &mut dyn FnMut(egui::Shape), col: egui::Color32, hw2: f32, hh2: f32| {
+                    let diff2 = hw2 - hh2;
+                    if diff2.abs() < 0.01 {
+                        v(egui::Shape::circle_filled(pcx, hw2 * scale, col));
+                    } else if diff2 > 0.0 {
+                        let ext2 = diff2;
+                        let pts = vec![rot_pt(-ext2,-hh2), rot_pt(ext2,-hh2),
+                                       rot_pt( ext2, hh2), rot_pt(-ext2, hh2)];
+                        v(egui::Shape::convex_polygon(pts, col, egui::Stroke::NONE));
+                        v(egui::Shape::circle_filled(rot_pt(-ext2, 0.0), hh2 * scale, col));
+                        v(egui::Shape::circle_filled(rot_pt( ext2, 0.0), hh2 * scale, col));
+                    } else {
+                        let ext2 = hh2 - hw2;
+                        let pts = vec![rot_pt(-hw2,-ext2), rot_pt(hw2,-ext2),
+                                       rot_pt( hw2, ext2), rot_pt(-hw2, ext2)];
+                        v(egui::Shape::convex_polygon(pts, col, egui::Stroke::NONE));
+                        v(egui::Shape::circle_filled(rot_pt(0.0, -ext2), hw2 * scale, col));
+                        v(egui::Shape::circle_filled(rot_pt(0.0,  ext2), hw2 * scale, col));
+                    }
+                };
+                let mut shapes_out = Vec::new();
+                draw_oval(&mut |s| shapes_out.push(s), drill_bg, hole_hw, hole_hh);
+                for s in shapes_out { painter.add(s); }
+                // Thin outline ring
+                let mut shapes_out = Vec::new();
+                draw_oval(&mut |s| shapes_out.push(s), ring_col, hole_hw + 0.05, hole_hh + 0.05);
+                // Don't draw outline for slot holes (looks noisy at small scale)
+            } else {
+                let dr = hr * scale;
+                painter.circle_filled(pcx, dr, drill_bg);
+                painter.circle_stroke(pcx, dr, egui::Stroke::new(1.0, ring_col));
+            }
         }
 
         if font_sz >= 7.0 {

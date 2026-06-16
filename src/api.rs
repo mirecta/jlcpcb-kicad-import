@@ -802,15 +802,19 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
     // EasyEDA footprint units: 1 unit = 10 mil = 0.254 mm
     const SCALE: f32 = 0.254;
 
-    // (cx, cy, w, h, number, shape, rotation, is_tht)
-    let mut raw: Vec<(f32, f32, f32, f32, String, String, f32, bool)> = Vec::new();
+    // (cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee)
+    // hole_r_ee = hole radius in EasyEDA units (p[9]); 0 = SMD
+    let mut raw: Vec<(f32, f32, f32, f32, String, String, f32, bool, f32)> = Vec::new();
 
     for shape in &shapes {
         let s = match shape.as_str() {
             Some(s) if s.starts_with("PAD~") => s,
             _ => continue,
         };
-        // PAD~shape~cx~cy~w~h~layer~net~number~???~oval_pts~rotation~id~...
+        // PAD~shape~cx~cy~w~h~layer~net~number~holeRadius~holePoints~rotation~id~...
+        // p[9]  = holeRadius in EasyEDA units (radius, not diameter); 0 for SMD
+        // p[10] = holePoints: "0" for round hole, "x1 y1 x2 y2" for oval/slot
+        // p[11] = rotation in degrees
         let p: Vec<&str> = s.split('~').collect();
         if p.len() < 6 { continue; }
 
@@ -823,10 +827,9 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
 
         let layer  = p.get(6).copied().unwrap_or("1");
         let number = p.get(8).copied().unwrap_or("1").to_string();
-        // p[9] is an EasyEDA-specific parameter; actual pad rotation is at p[11]
-        let rotation: f32 = p.get(11)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0.0);
+        // p[9] = hole radius in EasyEDA units (0 = SMD pad)
+        let hole_r_ee: f32 = p.get(9).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+        let rotation: f32  = p.get(11).and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
         let is_tht = layer == "11";
 
@@ -836,7 +839,7 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
             _                  => "circle",
         };
 
-        raw.push((cx, cy, w, h, number, kicad_shape.to_string(), rotation, is_tht));
+        raw.push((cx, cy, w, h, number, kicad_shape.to_string(), rotation, is_tht, hole_r_ee));
     }
 
     if raw.is_empty() { return vec![]; }
@@ -844,9 +847,16 @@ fn extract_pads(easyeda: &serde_json::Value) -> Vec<Pad> {
     let cx0 = raw.iter().map(|(x, ..)| *x).sum::<f32>() / raw.len() as f32;
     let cy0 = raw.iter().map(|(_, y, ..)| *y).sum::<f32>() / raw.len() as f32;
 
-    raw.into_iter().map(|(cx, cy, w, h, number, shape, rotation, is_tht)| {
-        // Through-hole drill: approximate as half the smaller pad dimension
-        let drill = if is_tht { w.min(h) * SCALE * 0.5 } else { 0.0 };
+    raw.into_iter().map(|(cx, cy, w, h, number, shape, rotation, is_tht, hole_r_ee)| {
+        // drill field = hole DIAMETER in mm
+        // p[9] is hole RADIUS in EasyEDA units → diameter = hole_r_ee * 2 * SCALE
+        let drill = if is_tht {
+            if hole_r_ee > 0.0 && hole_r_ee * 2.0 * SCALE < w.min(h) * SCALE {
+                hole_r_ee * 2.0 * SCALE  // actual diameter from EasyEDA data
+            } else {
+                w.min(h) * SCALE * 0.5   // fallback: half the smaller pad dimension
+            }
+        } else { 0.0 };
         Pad {
             cx: (cx - cx0) * SCALE,
             cy: (cy - cy0) * SCALE,
