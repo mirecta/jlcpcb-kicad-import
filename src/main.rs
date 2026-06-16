@@ -1577,15 +1577,46 @@ fn show_footprint_preview(
                     }
                 }
                 api::FpGraphic::Arc { start, mid, end, .. } => {
-                    // Approximate arc with line segments: start → mid → end
-                    // For a proper arc, compute centre+radius from the 3 points
-                    let s = ts(start[0], start[1]);
-                    let m = ts(mid[0],   mid[1]);
-                    let e = ts(end[0],   end[1]);
-                    // Use quadratic Bezier approximation through start, mid, end
+                    // Compute circle centre from 3 arc points (circumcircle)
+                    let (ax, ay) = (start[0], start[1]);
+                    let (bx, by) = (mid[0],   mid[1]);
+                    let (ex, ey) = (end[0],   end[1]);
+                    let d = 2.0 * (ax*(by-ey) + bx*(ey-ay) + ex*(ay-by));
                     let stroke = egui::Stroke::new(pw, col);
-                    painter.line_segment([s, m], stroke);
-                    painter.line_segment([m, e], stroke);
+                    if d.abs() < 1e-8 {
+                        // Collinear — just draw two segments
+                        painter.line_segment([ts(ax,ay), ts(bx,by)], stroke);
+                        painter.line_segment([ts(bx,by), ts(ex,ey)], stroke);
+                    } else {
+                        let a2 = ax*ax + ay*ay;
+                        let b2 = bx*bx + by*by;
+                        let e2 = ex*ex + ey*ey;
+                        let ocx = (a2*(by-ey) + b2*(ey-ay) + e2*(ay-by)) / d;
+                        let ocy = (a2*(ex-bx) + b2*(ax-ex) + e2*(bx-ax)) / d;
+                        let r   = ((ax-ocx)*(ax-ocx) + (ay-ocy)*(ay-ocy)).sqrt();
+
+                        let a1 = (ay-ocy).atan2(ax-ocx);
+                        let am = (by-ocy).atan2(bx-ocx);
+                        let a2 = (ey-ocy).atan2(ex-ocx);
+
+                        // Determine sweep direction: which arc from a1→a2 passes through mid?
+                        let norm = |a: f32| { let mut v = a; while v < 0.0 { v += std::f32::consts::TAU; } v % std::f32::consts::TAU };
+                        let da_mid = norm(am - a1);
+                        let da_end = norm(a2 - a1);
+                        let sweep = if da_mid < da_end { da_end } else { da_end - std::f32::consts::TAU };
+
+                        // Number of segments proportional to arc length on screen
+                        let arc_px = r * scale * sweep.abs();
+                        let n = ((arc_px / 4.0) as usize).clamp(4, 128);
+
+                        let pts: Vec<egui::Pos2> = (0..=n).map(|i| {
+                            let angle = a1 + sweep * (i as f32 / n as f32);
+                            ts(ocx + r * angle.cos(), ocy + r * angle.sin())
+                        }).collect();
+                        for w in pts.windows(2) {
+                            painter.line_segment([w[0], w[1]], stroke);
+                        }
+                    }
                 }
             }
         }
