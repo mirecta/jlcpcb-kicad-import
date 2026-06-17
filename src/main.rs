@@ -178,6 +178,8 @@ struct AppState {
     refresh_footprints:       bool,
     refresh_3d:               bool,
     refresh_keep_3d_settings: bool,
+    // (lcsc_id, display_name, selected)
+    refresh_component_list: Vec<(String, String, bool)>,
 
     // Status / loading
     status: String,
@@ -276,7 +278,7 @@ impl App {
         });
     }
 
-    fn do_refresh_library(&mut self, opts: RefreshOptions) {
+    fn do_refresh_library_ids(&mut self, opts: RefreshOptions, ids: Vec<String>) {
         let lib_path          = self.state.settings.lib_path.clone();
         let lib_name          = self.state.settings.lib_name.clone();
         let hide_pin_numbers  = self.state.hide_pin_numbers;
@@ -288,7 +290,6 @@ impl App {
 
             let paths = export::LibPaths::new(&lib_path, &lib_name);
 
-            // Symbol library is the master list — scan it for all LCSC IDs
             let sym_content = match fs::read_to_string(&paths.sym_file) {
                 Ok(c) => c,
                 Err(e) => {
@@ -297,10 +298,9 @@ impl App {
                 }
             };
 
-            let lcsc_ids = extract_lcsc_ids(&sym_content);
-            let total = lcsc_ids.len();
+            let total = ids.len();
             if total == 0 {
-                let _ = tx.send(BgMsg::RefreshErr("No components with LCSC IDs found in symbol library".to_string()));
+                let _ = tx.send(BgMsg::RefreshErr("No components selected".to_string()));
                 return;
             }
 
@@ -308,7 +308,7 @@ impl App {
             let mut updated_count = 0;
             let mut failed_count = 0;
 
-            for (i, lcsc_id) in lcsc_ids.iter().enumerate() {
+            for (i, lcsc_id) in ids.iter().enumerate() {
                 let _ = tx.send(BgMsg::RefreshProgress(i + 1, total));
 
                 let comp = match api::fetch_component(lcsc_id) {
@@ -543,10 +543,12 @@ impl eframe::App for App {
             let mut open = true;
             egui::Window::new("Refresh Library")
                 .collapsible(false)
-                .resizable(false)
+                .resizable(true)
+                .default_size([420.0, 520.0])
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .open(&mut open)
                 .show(ctx, |ui| {
+                    // What to refresh
                     ui.add_space(4.0);
                     ui.checkbox(&mut self.state.refresh_symbols, "Refresh symbols");
                     ui.indent("sym_opts", |ui| {
@@ -555,9 +557,9 @@ impl eframe::App for App {
                             egui::Checkbox::new(&mut self.state.refresh_keep_sym_labels, "Keep symbol label positions"),
                         );
                     });
-                    ui.add_space(6.0);
+                    ui.add_space(4.0);
                     ui.checkbox(&mut self.state.refresh_footprints, "Refresh footprints");
-                    ui.add_space(6.0);
+                    ui.add_space(4.0);
                     ui.checkbox(&mut self.state.refresh_3d, "Refresh 3D models");
                     ui.indent("d3_opts", |ui| {
                         ui.add_enabled(
@@ -565,12 +567,53 @@ impl eframe::App for App {
                             egui::Checkbox::new(&mut self.state.refresh_keep_3d_settings, "Keep 3D model settings"),
                         );
                     });
-                    ui.add_space(10.0);
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    // Component list header + select/deselect all
+                    let n_sel = self.state.refresh_component_list.iter().filter(|c| c.2).count();
+                    let n_total = self.state.refresh_component_list.len();
                     ui.horizontal(|ui| {
-                        let nothing_selected = !self.state.refresh_symbols
+                        ui.strong(format!("Components ({}/{})", n_sel, n_total));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("None").clicked() {
+                                for c in &mut self.state.refresh_component_list { c.2 = false; }
+                            }
+                            if ui.small_button("All").clicked() {
+                                for c in &mut self.state.refresh_component_list { c.2 = true; }
+                            }
+                        });
+                    });
+                    ui.add_space(2.0);
+
+                    // Scrollable component list
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            for (lcsc, name, selected) in &mut self.state.refresh_component_list {
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(selected, "");
+                                    ui.label(egui::RichText::new(lcsc.as_str()).monospace().color(
+                                        if *selected { ui.visuals().text_color() }
+                                        else { ui.visuals().weak_text_color() }
+                                    ));
+                                    ui.label(egui::RichText::new(name.as_str()).color(
+                                        if *selected { ui.visuals().text_color() }
+                                        else { ui.visuals().weak_text_color() }
+                                    ));
+                                });
+                            }
+                        });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let nothing = !self.state.refresh_symbols
                             && !self.state.refresh_footprints
                             && !self.state.refresh_3d;
-                        if ui.add_enabled(!nothing_selected, egui::Button::new("Refresh")).clicked() {
+                        let no_comps = n_sel == 0;
+                        if ui.add_enabled(!nothing && !no_comps, egui::Button::new("Refresh")).clicked() {
                             let opts = RefreshOptions {
                                 symbols:          self.state.refresh_symbols,
                                 keep_sym_labels:  self.state.refresh_keep_sym_labels,
@@ -578,8 +621,14 @@ impl eframe::App for App {
                                 models_3d:        self.state.refresh_3d,
                                 keep_3d_settings: self.state.refresh_keep_3d_settings,
                             };
+                            // Pass only selected LCSC IDs
+                            let selected_ids: Vec<String> = self.state.refresh_component_list
+                                .iter()
+                                .filter(|c| c.2)
+                                .map(|c| c.0.clone())
+                                .collect();
                             self.state.show_refresh_dialog = false;
-                            self.do_refresh_library(opts);
+                            self.do_refresh_library_ids(opts, selected_ids);
                         }
                         if ui.button("Cancel").clicked() {
                             self.state.show_refresh_dialog = false;
@@ -685,6 +734,17 @@ impl eframe::App for App {
                         self.state.show_settings = true;
                     }
                     if ui.add_enabled(!self.state.loading, egui::Button::new("🔄 Refresh Library")).clicked() {
+                        // Load component list from symbol library
+                        let sym_file = std::path::Path::new(&self.state.settings.lib_path)
+                            .join(format!("{}.kicad_sym", self.state.settings.lib_name));
+                        if let Ok(content) = std::fs::read_to_string(&sym_file) {
+                            self.state.refresh_component_list = extract_lcsc_ids_with_names(&content)
+                                .into_iter()
+                                .map(|(id, name)| (id, name, true))
+                                .collect();
+                        } else {
+                            self.state.refresh_component_list = Vec::new();
+                        }
                         self.state.show_refresh_dialog = true;
                     }
                 });
@@ -2021,19 +2081,34 @@ fn create_app_icon() -> egui::IconData {
 // ── Library refresh helpers ──────────────────────────────────────────────────
 
 fn extract_lcsc_ids(content: &str) -> Vec<String> {
-    let mut ids = Vec::new();
+    extract_lcsc_ids_with_names(content).into_iter().map(|(id, _)| id).collect()
+}
+
+/// Returns (lcsc_id, symbol_name) pairs from a .kicad_sym file.
+fn extract_lcsc_ids_with_names(content: &str) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    let mut current_sym_name = String::new();
     for line in content.lines() {
+        // (symbol "Name" ...) — top-level symbol definition
+        if line.trim_start().starts_with("(symbol \"") && !line.contains("_1_1") && !line.contains("_0_1") {
+            if let Some(s) = line.find("(symbol \"") {
+                let after = &line[s + 9..];
+                if let Some(e) = after.find('"') {
+                    current_sym_name = after[..e].to_string();
+                }
+            }
+        }
         if line.contains("(property \"LCSC\"") {
-            // Extract LCSC ID from: (property "LCSC" "C7512" ...
             if let Some(start) = line.find("\"LCSC\" \"") {
                 let after = &line[start + 9..];
                 if let Some(end) = after.find('"') {
-                    ids.push(after[..end].to_string());
+                    let lcsc = after[..end].to_string();
+                    result.push((lcsc, current_sym_name.clone()));
                 }
             }
         }
     }
-    ids
+    result
 }
 
 fn update_component_in_lib(
