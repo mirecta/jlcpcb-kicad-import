@@ -29,12 +29,10 @@ pub fn write_symbol(
     paths: &LibPaths,
     component: &Component,
     lib_name: &str,
-    ref_pos: [f32; 2],
-    val_pos: [f32; 2],
     hide_pin_numbers: bool,
     hide_pin_names: bool,
 ) -> Result<()> {
-    let sym = build_symbol(component, lib_name, ref_pos, val_pos, hide_pin_numbers, hide_pin_names);
+    let sym = build_symbol(component, lib_name, hide_pin_numbers, hide_pin_names);
     let name = sanitize_name(&component.value);
 
     if paths.sym_file.exists() {
@@ -187,14 +185,34 @@ pub fn ref_letter(category: &str) -> &'static str {
     "U"
 }
 
-pub fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [f32; 2], hide_pin_numbers: bool, hide_pin_names: bool) -> String {
+/// Auto-compute reference and value label positions from pin extents.
+pub fn label_positions(pins: &[Pin]) -> ([f32; 2], [f32; 2]) {
+    let ys: Vec<f32> = pins.iter().flat_map(|p| {
+        let by = match p.angle {
+            90  => p.y + 2.54,
+            270 => p.y - 2.54,
+            _   => p.y,
+        };
+        [p.y, by]
+    }).collect();
+    let (max_y, min_y) = if ys.is_empty() {
+        (1.27f32, -1.27f32)
+    } else {
+        (ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+         ys.iter().cloned().fold(f32::INFINITY,     f32::min))
+    };
+    ([0.0, max_y + 2.54], [0.0, min_y - 2.54])
+}
+
+pub fn build_symbol(c: &Component, lib_name: &str, hide_pin_numbers: bool, hide_pin_names: bool) -> String {
     let name = sanitize_name(&c.value);
     let footprint_ref = format!("{}:{}", lib_name, package_name(c));
 
-    let mut props = Vec::new();
-    let mut y = (val_pos[1] - 1.27f32).min(ref_pos[1] - 1.27);
+    let (ref_pos, val_pos) = label_positions(&c.pins);
 
-    // Reference and Value with user-adjusted positions
+    let mut props = Vec::new();
+
+    // Reference and Value with auto-computed positions
     props.push(format!(
         r#"    (property "Reference" "{}"
       (at {} {} 0)
@@ -209,7 +227,7 @@ pub fn build_symbol(c: &Component, lib_name: &str, ref_pos: [f32; 2], val_pos: [
     )"#,
         esc(&electrical_value(c)), val_pos[0], val_pos[1]
     ));
-    y = val_pos[1] - 1.27;
+    let mut y = val_pos[1] - 1.27;
     props.push(prop("Footprint", &footprint_ref, y, false, false));
     y -= 1.27;
     props.push(prop("Part Name", &c.value, y, false, false));

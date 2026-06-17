@@ -1664,3 +1664,19 @@ fn fetch_svgs(lcsc_id: &str) -> Result<Svgs> {
     Ok(Svgs { symbol, footprint })
 }
 
+
+#[cfg(test)]
+mod c3013946_tests {
+    use super::*;
+    use crate::export;
+    #[test]
+    fn test_esp32s3_footprint() {
+        let comp = fetch_component("C3013946").expect("fetch C3013946");
+        eprintln!("pads: {}, pins: {}, fp_graphics: {}", comp.pads.len(), comp.pins.len(), comp.fp_graphics.len());
+        let content = export::build_footprint_content(
+            &comp, "WIRELM-SMD_ESP32-S3-WROOM-1U", "packages3d/WIRELM-SMD_ESP32-S3-WROOM-1U.step",
+            [0.0,0.0,0.0],[0.0,0.0,0.0],[1.0,1.0,1.0],
+        );
+        std::fs::write("/tmp/our_esp32s3.kicad_mod", &content).unwrap();
+    }
+}

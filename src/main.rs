@@ -101,7 +101,6 @@ impl PanZoom {
 #[derive(Clone, Copy)]
 struct RefreshOptions {
     symbols:          bool,
-    keep_sym_labels:  bool,
     footprints:       bool,
     models_3d:        bool,
     keep_3d_settings: bool,
@@ -139,10 +138,6 @@ struct AppState {
     sym_pz: PanZoom,
     fp_pz: PanZoom,
 
-    // Symbol text position adjustment
-    ref_pos: [f32; 2],  // Reference label X/Y
-    val_pos: [f32; 2],  // Value label X/Y
-
     // 3D viewer + adjustment
     model_viewer: model3d::ModelViewer,
     model_offset:   [f32; 3],
@@ -174,7 +169,6 @@ struct AppState {
     // Refresh dialog
     show_refresh_dialog: bool,
     refresh_symbols:          bool,
-    refresh_keep_sym_labels:  bool,
     refresh_footprints:       bool,
     refresh_3d:               bool,
     refresh_keep_3d_settings: bool,
@@ -215,7 +209,6 @@ impl App {
         state.hide_pin_numbers = true;
         state.hide_pin_names   = false;
         state.refresh_symbols          = true;
-        state.refresh_keep_sym_labels  = true;
         state.refresh_footprints       = true;
         state.refresh_3d               = true;
         state.refresh_keep_3d_settings = true;
@@ -321,8 +314,7 @@ impl App {
                 if opts.symbols {
                     updated_sym = update_component_in_lib(
                         &updated_sym, lcsc_id, &comp,
-                        opts.keep_sym_labels, &lib_name,
-                        hide_pin_numbers, hide_pin_names,
+                        &lib_name, hide_pin_numbers, hide_pin_names,
                     );
                 }
 
@@ -436,24 +428,6 @@ impl eframe::App for App {
                     }
                     self.state.sym_pz.reset();
                     self.state.fp_pz.reset();
-                    // Default ref/val positions just outside the symbol body bounds
-                    let (body_max_y, body_min_y): (f32, f32) = {
-                        let ys: Vec<f32> = comp.pins.iter().flat_map(|p| {
-                            let by = match p.angle {
-                                90  => p.y + 2.54,
-                                270 => p.y - 2.54,
-                                _   => p.y,
-                            };
-                            [p.y, by]
-                        }).collect();
-                        if ys.is_empty() { (1.27, -1.27) }
-                        else {
-                            (ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
-                             ys.iter().cloned().fold(f32::INFINITY,     f32::min))
-                        }
-                    };
-                    self.state.ref_pos = [0.0, body_max_y + 2.54];
-                    self.state.val_pos = [0.0, body_min_y - 2.54];
                     // Start all model params at zero/unity so what you see in our app
                     // is exactly what gets written to KiCad (same numbers, same visual).
                     self.state.model_offset   = [0.0, 0.0, 0.0];
@@ -577,12 +551,6 @@ impl eframe::App for App {
                     // What to refresh
                     ui.add_space(4.0);
                     ui.checkbox(&mut self.state.refresh_symbols, "Refresh symbols");
-                    ui.indent("sym_opts", |ui| {
-                        ui.add_enabled(
-                            self.state.refresh_symbols,
-                            egui::Checkbox::new(&mut self.state.refresh_keep_sym_labels, "Keep symbol label positions"),
-                        );
-                    });
                     ui.add_space(4.0);
                     ui.checkbox(&mut self.state.refresh_footprints, "Refresh footprints");
                     ui.add_space(4.0);
@@ -642,7 +610,6 @@ impl eframe::App for App {
                         if ui.add_enabled(!nothing && !no_comps, egui::Button::new("Refresh")).clicked() {
                             let opts = RefreshOptions {
                                 symbols:          self.state.refresh_symbols,
-                                keep_sym_labels:  self.state.refresh_keep_sym_labels,
                                 footprints:       self.state.refresh_footprints,
                                 models_3d:        self.state.refresh_3d,
                                 keep_3d_settings: self.state.refresh_keep_3d_settings,
@@ -983,16 +950,16 @@ impl eframe::App for App {
                 ui.columns(2, |cols| {
                     // Left: previews (interactive pan/zoom)
                     if !comp.pins.is_empty() {
-                        // KiCad-style symbol with movable ref/val labels
                         cols[0].label(egui::RichText::new("Symbol  (drag: pan  scroll: zoom)").strong());
+                        let (ref_pos, val_pos) = export::label_positions(&comp.pins);
                         show_symbol_preview(
                             &mut cols[0],
                             &comp.pins,
                             &comp.sym_graphics,
                             &export::electrical_value(&comp),
                             export::ref_letter(&comp.category),
-                            self.state.ref_pos,
-                            self.state.val_pos,
+                            ref_pos,
+                            val_pos,
                             &mut self.state.sym_pz,
                             egui::Vec2::new(460.0, 380.0),
                             self.state.hide_pin_names,
@@ -1009,23 +976,6 @@ impl eframe::App for App {
                     } else {
                         cols[0].label(egui::RichText::new("Symbol  (no data)").strong());
                     }
-                    cols[0].add_space(4.0);
-                    cols[0].separator();
-                    cols[0].label(egui::RichText::new("Symbol Text Positions (mm)").strong());
-                    egui::Grid::new("sym_adj").spacing([8.0, 4.0]).show(&mut cols[0], |ui| {
-                        ui.label("Reference X:");
-                        scrollable_drag_helper(ui, &mut self.state.ref_pos[0], 0.1, 0.0025, None);
-                        ui.label("Y:");
-                        scrollable_drag_helper(ui, &mut self.state.ref_pos[1], 0.1, 0.0025, None);
-                        if ui.button("Reset").clicked() { self.state.ref_pos = [0.0, 3.81]; }
-                        ui.end_row();
-                        ui.label("Value X:");
-                        scrollable_drag_helper(ui, &mut self.state.val_pos[0], 0.1, 0.0025, None);
-                        ui.label("Y:");
-                        scrollable_drag_helper(ui, &mut self.state.val_pos[1], 0.1, 0.0025, None);
-                        if ui.button("Reset").clicked() { self.state.val_pos = [0.0, 2.54]; }
-                        ui.end_row();
-                    });
                     cols[0].add_space(4.0);
                     cols[0].label(egui::RichText::new("Footprint  (drag: pan  scroll: zoom)").strong());
                     show_footprint_preview(
@@ -1349,7 +1299,6 @@ impl eframe::App for App {
                         // Import symbol
                         if self.state.import_symbol {
                             export::write_symbol(&paths, &comp, &lib_name,
-                                self.state.ref_pos, self.state.val_pos,
                                 self.state.hide_pin_numbers,
                                 self.state.hide_pin_names)?;
                         }
@@ -2139,24 +2088,14 @@ fn extract_lcsc_ids_with_names(content: &str) -> Vec<(String, String)> {
 
 fn update_component_in_lib(
     content: &str,
-    lcsc_id: &str,
+    _lcsc_id: &str,
     comp: &Component,
-    keep_labels: bool,
     lib_name: &str,
     hide_pin_numbers: bool,
     hide_pin_names: bool,
 ) -> String {
     let name = export::sanitize_name(&comp.value);
-
-    // Extract existing label positions before rebuilding if requested
-    let (ref_pos, val_pos) = if keep_labels {
-        export::extract_label_positions(content, lcsc_id)
-            .unwrap_or(([0.0, 2.54], [0.0, -2.54]))
-    } else {
-        ([0.0, 2.54], [0.0, -2.54])
-    };
-
-    let new_sym = export::build_symbol(comp, lib_name, ref_pos, val_pos, hide_pin_numbers, hide_pin_names);
+    let new_sym = export::build_symbol(comp, lib_name, hide_pin_numbers, hide_pin_names);
     export::replace_symbol_in_lib(content, &name, &new_sym)
 }
 
