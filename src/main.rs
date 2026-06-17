@@ -409,14 +409,15 @@ impl App {
                     }
                 }
 
-                updated_count += 1;
-            }
-
-            if opts.symbols {
-                if let Err(e) = fs::write(&paths.sym_file, updated_sym) {
-                    let _ = tx.send(BgMsg::RefreshErr(format!("Failed to write symbol library: {}", e)));
-                    return;
+                // Write symbol library after every component so progress is never lost
+                if opts.symbols {
+                    if let Err(e) = fs::write(&paths.sym_file, &updated_sym) {
+                        let _ = tx.send(BgMsg::RefreshErr(format!("Failed to write symbol library: {}", e)));
+                        return;
+                    }
                 }
+
+                updated_count += 1;
             }
 
             let _ = tx.send(BgMsg::RefreshDone(updated_count, failed_count));
