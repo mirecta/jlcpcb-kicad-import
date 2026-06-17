@@ -109,9 +109,10 @@ struct RefreshOptions {
 enum BgMsg {
     SearchDone(Vec<SearchResult>),
     SearchErr(String),
-    DetailDone(Component, Option<Vec<u8>>, Option<Vec<u8>>),  // comp, wrl_vrml, step
+    DetailDone(Component, Option<Vec<u8>>, Option<Vec<u8>>, Option<String>),  // comp, wrl, step, warning
     DetailErr(String),
     RefreshProgress(usize, usize),  // current, total
+    RefreshStatus(String),          // per-component status line
     RefreshDone(usize, usize),      // updated_count, failed_count
     RefreshErr(String),
 }
@@ -255,19 +256,29 @@ impl App {
         self.state.status = format!("Loading {}…", lcsc_id);
         let ctx = ctx.clone();
         self.spawn(move |tx| {
-            match api::fetch_component(&lcsc_id) {
-                Err(e) => { let _ = tx.send(BgMsg::DetailErr(e.to_string())); }
-                Ok(comp) => {
-                    // Download WRL (EasyEDA OBJ → converted to VRML 2.0 in memory)
-                    let wrl = comp.wrl_url.as_deref()
-                        .and_then(|url| api::download_wrl(url));
-                    // Download STEP (raw binary for KiCad export)
-                    let step = comp.step_url.as_deref()
-                        .and_then(|url| api::download_bytes(url).ok());
-                    let _ = tx.send(BgMsg::DetailDone(comp, wrl, step));
-                    ctx.request_repaint();
+            let mut comp = match api::fetch_component(&lcsc_id) {
+                Err(e) => { let _ = tx.send(BgMsg::DetailErr(e.to_string())); return; }
+                Ok(c) => c,
+            };
+            // Retry once if data is incomplete (rate-limited response)
+            if comp.pins.is_empty() || comp.pads.is_empty() {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if let Ok(retry) = api::fetch_component(&lcsc_id) {
+                    if !retry.pins.is_empty() || !retry.pads.is_empty() {
+                        comp = retry;
+                    }
                 }
             }
+            let warn: Option<String> = match (comp.pins.is_empty(), comp.pads.is_empty()) {
+                (true, true)  => Some("⚠ No pin data and no footprint data from API".into()),
+                (true, false) => Some("⚠ No pin data from API".into()),
+                (false, true) => Some("⚠ No footprint data from API".into()),
+                _             => None,
+            };
+            let wrl = comp.wrl_url.as_deref().and_then(|url| api::download_wrl(url));
+            let step = comp.step_url.as_deref().and_then(|url| api::download_bytes(url).ok());
+            let _ = tx.send(BgMsg::DetailDone(comp, wrl, step, warn));
+            ctx.request_repaint();
         });
     }
 
@@ -305,18 +316,26 @@ impl App {
 
             for (i, lcsc_id) in ids.iter().enumerate() {
                 let _ = tx.send(BgMsg::RefreshProgress(i + 1, total));
-                // Pace requests to avoid rate-limiting (each component = 3 API calls)
-                if i > 0 { std::thread::sleep(std::time::Duration::from_millis(500)); }
+                // Pace requests: each component = 3 API calls; stay under ~1 req/sec total
+                if i > 0 { std::thread::sleep(std::time::Duration::from_millis(1500)); }
 
                 let comp = {
                     let mut c = match api::fetch_component(lcsc_id) {
                         Ok(c) => c,
-                        Err(_) => { failed_count += 1; continue; }
+                        Err(e) => {
+                            let _ = tx.send(BgMsg::RefreshStatus(
+                                format!("⚠ {} — download failed: {}", lcsc_id, e)
+                            ));
+                            failed_count += 1; continue;
+                        }
                     };
                     // Retry up to 2x if we need pin/pad data but got none (API rate-limit)
                     let need_sym = opts.symbols && c.pins.is_empty();
                     let need_fp  = opts.footprints && c.pads.is_empty();
                     if need_sym || need_fp {
+                        let _ = tx.send(BgMsg::RefreshStatus(
+                            format!("⟳ {} — retrying (empty data, possible rate-limit)…", lcsc_id)
+                        ));
                         for _ in 0..2 {
                             std::thread::sleep(std::time::Duration::from_secs(2));
                             if let Ok(retry) = api::fetch_component(lcsc_id) {
@@ -328,6 +347,18 @@ impl App {
                                 }
                                 if got_sym || got_fp { c = retry; }
                             }
+                        }
+                        if (need_sym && c.pins.is_empty()) || (need_fp && c.pads.is_empty()) {
+                            let _ = tx.send(BgMsg::RefreshStatus(
+                                format!("⚠ {} — incomplete data after retries (no {})",
+                                    lcsc_id,
+                                    match (need_sym && c.pins.is_empty(), need_fp && c.pads.is_empty()) {
+                                        (true, true)  => "pins or pads",
+                                        (true, false) => "pins",
+                                        _             => "pads",
+                                    }
+                                )
+                            ));
                         }
                     }
                     c
@@ -427,8 +458,8 @@ impl eframe::App for App {
         // Poll background channel
         let msg = self.state.bg_rx.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(msg) = msg {
-            // Don't reset loading/bg_rx yet - RefreshProgress needs to keep the channel open
-            let is_progress = matches!(msg, BgMsg::RefreshProgress(_, _));
+            // Don't reset loading/bg_rx yet - RefreshProgress/RefreshStatus need the channel open
+            let is_progress = matches!(msg, BgMsg::RefreshProgress(_, _) | BgMsg::RefreshStatus(_));
             if !is_progress {
                 self.state.loading = false;
                 self.state.bg_rx = None;
@@ -441,7 +472,7 @@ impl eframe::App for App {
                 BgMsg::SearchErr(e) => {
                     self.state.status = format!("Search error: {}", e);
                 }
-                BgMsg::DetailDone(comp, wrl, step) => {
+                BgMsg::DetailDone(comp, wrl, step, warn) => {
                     if let Some(svg) = &comp.symbol_svg {
                         if let Ok(img) = preview::svg_to_image(svg, 1200, 900) {
                             self.state.symbol_texture =
@@ -493,7 +524,11 @@ impl eframe::App for App {
                     };
                     self.state.wrl_bytes  = wrl;
                     self.state.step_bytes = step;
-                    self.state.status = format!("Loaded: {} ({}){}", comp.value, comp.lcsc_id, model_status);
+                    self.state.status = if let Some(w) = warn {
+                        format!("Loaded: {} ({}){} — {}", comp.value, comp.lcsc_id, model_status, w)
+                    } else {
+                        format!("Loaded: {} ({}){}", comp.value, comp.lcsc_id, model_status)
+                    };
                     // Auto-check "Hide pin names" for passives and crystals
                     let cat = comp.category.to_lowercase();
                     self.state.hide_pin_names = cat.contains("capacitor") || cat.contains("resistor")
@@ -512,18 +547,21 @@ impl eframe::App for App {
                 }
                 BgMsg::RefreshProgress(current, total) => {
                     self.state.status = format!("Refreshing library... {}/{}", current, total);
-                    // Keep loading=true and bg_rx open for more progress messages
+                    ctx.request_repaint();
+                }
+                BgMsg::RefreshStatus(msg) => {
+                    self.state.status = msg;
                     ctx.request_repaint();
                 }
                 BgMsg::RefreshDone(updated, failed) => {
                     self.state.status = if failed == 0 {
                         format!("✓ Refreshed {} components", updated)
                     } else {
-                        format!("✓ Refreshed {} components ({} failed)", updated, failed)
+                        format!("⚠ Refreshed {} components, {} failed — check connection or slow down", updated, failed)
                     };
                 }
                 BgMsg::RefreshErr(e) => {
-                    self.state.status = format!("Refresh error: {}", e);
+                    self.state.status = format!("⚠ Refresh error: {}", e);
                 }
             }
             ctx.request_repaint();
