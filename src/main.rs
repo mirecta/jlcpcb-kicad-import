@@ -355,8 +355,9 @@ impl App {
 
                 if opts.symbols {
                     updated_sym = update_component_in_lib(
-                        &updated_sym, lcsc_id, &comp,
-                        &lib_name, hide_pin_numbers, hide_pin_names,
+                        &updated_sym, &comp,
+                        &lib_name, &paths.fp_dir,
+                        hide_pin_numbers, hide_pin_names,
                     );
                 }
 
@@ -2138,14 +2139,17 @@ fn extract_lcsc_ids_with_names(content: &str) -> Vec<(String, String)> {
 
 fn update_component_in_lib(
     content: &str,
-    _lcsc_id: &str,
     comp: &Component,
     lib_name: &str,
+    fp_dir: &std::path::Path,
     hide_pin_numbers: bool,
     hide_pin_names: bool,
 ) -> String {
     let name = export::sanitize_name(&comp.value);
-    let new_sym = export::build_symbol(comp, lib_name, hide_pin_numbers, hide_pin_names);
+    let fp_name = export::find_fp_by_lcsc(fp_dir, &comp.lcsc_id)
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| export::package_name(comp));
+    let new_sym = export::build_symbol(comp, lib_name, &fp_name, hide_pin_numbers, hide_pin_names);
     export::replace_symbol_in_lib(content, &name, &new_sym)
 }
 

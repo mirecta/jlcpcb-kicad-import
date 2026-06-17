@@ -32,7 +32,11 @@ pub fn write_symbol(
     hide_pin_numbers: bool,
     hide_pin_names: bool,
 ) -> Result<()> {
-    let sym = build_symbol(component, lib_name, hide_pin_numbers, hide_pin_names);
+    // Use the actual footprint filename (found by LCSC) so symbol ref stays in sync
+    let fp_name = find_fp_by_lcsc(&paths.fp_dir, &component.lcsc_id)
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| package_name(component));
+    let sym = build_symbol(component, lib_name, &fp_name, hide_pin_numbers, hide_pin_names);
     let name = sanitize_name(&component.value);
 
     if paths.sym_file.exists() {
@@ -204,9 +208,9 @@ pub fn label_positions(pins: &[Pin]) -> ([f32; 2], [f32; 2]) {
     ([0.0, max_y + 2.54], [0.0, min_y - 2.54])
 }
 
-pub fn build_symbol(c: &Component, lib_name: &str, hide_pin_numbers: bool, hide_pin_names: bool) -> String {
+pub fn build_symbol(c: &Component, lib_name: &str, fp_name: &str, hide_pin_numbers: bool, hide_pin_names: bool) -> String {
     let name = sanitize_name(&c.value);
-    let footprint_ref = format!("{}:{}", lib_name, package_name(c));
+    let footprint_ref = format!("{}:{}", lib_name, fp_name);
 
     let (ref_pos, val_pos) = label_positions(&c.pins);
 
