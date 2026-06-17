@@ -303,6 +303,8 @@ impl App {
                 let _ = tx.send(BgMsg::RefreshErr("No components selected".to_string()));
                 return;
             }
+            // Track already-written footprint paths to avoid duplicate writes for shared footprints
+            let mut written_fps: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
 
             let mut updated_sym = sym_content.clone();
             let mut updated_count = 0;
@@ -347,14 +349,20 @@ impl App {
                     let stem = fp_path.file_stem().unwrap_or_default().to_string_lossy();
                     let model_ext = if paths.model_dir.join(format!("{}.wrl", stem)).exists() { "wrl" } else { "step" };
 
-                    // Build and write footprint content directly to the resolved path
-                    let model_path = format!(
-                        "${{{}_3D}}/{}.{}",
-                        lib_name.to_uppercase().replace('-', "_"), stem, model_ext
-                    );
-                    let content = export::build_footprint_content(&comp, &model_path, offset, rotation, scale);
-                    if fs::write(&fp_path, content).is_err() {
-                        failed_count += 1; continue;
+                    // Skip if this file was already written by an earlier component in this run
+                    // (multiple components can share one footprint file, e.g. many 0603 resistors)
+                    if written_fps.contains(&fp_path) {
+                        // still count as success
+                    } else {
+                        let model_path = format!(
+                            "${{{}_3D}}/{}.{}",
+                            lib_name.to_uppercase().replace('-', "_"), stem, model_ext
+                        );
+                        let content = export::build_footprint_content(&comp, &stem, &model_path, offset, rotation, scale);
+                        if fs::write(&fp_path, content).is_err() {
+                            failed_count += 1; continue;
+                        }
+                        written_fps.insert(fp_path);
                     }
                 }
 

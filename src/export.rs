@@ -86,7 +86,7 @@ pub fn write_footprint(
         name = name,
         ext  = model_ext,
     );
-    let content = build_footprint(component, &model_path, model_offset, model_rotation, model_scale);
+    let content = build_footprint(component, &name, &model_path, model_offset, model_rotation, model_scale);
     let fp_file = paths.fp_dir.join(format!("{}.kicad_mod", name));
     std::fs::write(&fp_file, content)?;
     Ok(())
@@ -310,22 +310,23 @@ fn esc_pin(s: &str) -> String {
 
 pub fn build_footprint_content(
     component: &Component,
+    name: &str,
     model_path: &str,
     model_offset: [f32; 3],
     model_rotation: [f32; 3],
     model_scale: [f32; 3],
 ) -> String {
-    build_footprint(component, model_path, model_offset, model_rotation, model_scale)
+    build_footprint(component, name, model_path, model_offset, model_rotation, model_scale)
 }
 
 fn build_footprint(
     c: &Component,
+    name: &str,
     model_path: &str,
     offset: [f32; 3],
     rotation: [f32; 3],
     scale: [f32; 3],
 ) -> String {
-    let name = package_name(c);
 
     // Compute bounding box from pads + SilkS/Fab graphics to place labels outside the footprint
     let mut all_ys: Vec<f32> = c.pads.iter()
