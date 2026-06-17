@@ -337,7 +337,9 @@ impl App {
                         ([0.0f32;3], [0.0f32;3], [1.0f32,1.0,1.0])
                     };
                     let model_ext = if paths.model_dir.join(format!("{}.wrl", pkg)).exists() { "wrl" } else { "step" };
-                    let _ = export::write_footprint(&paths, &comp, &lib_name, offset, rotation, scale, model_ext);
+                    if export::write_footprint(&paths, &comp, &lib_name, offset, rotation, scale, model_ext).is_err() {
+                        failed_count += 1; continue;
+                    }
                 }
 
                 if opts.models_3d {
@@ -2100,7 +2102,7 @@ fn extract_lcsc_ids_with_names(content: &str) -> Vec<(String, String)> {
         }
         if line.contains("(property \"LCSC\"") {
             if let Some(start) = line.find("\"LCSC\" \"") {
-                let after = &line[start + 9..];
+                let after = &line[start + 8..];  // "LCSC" " is 8 chars
                 if let Some(end) = after.find('"') {
                     let lcsc = after[..end].to_string();
                     result.push((lcsc, current_sym_name.clone()));
