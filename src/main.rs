@@ -311,14 +311,14 @@ impl App {
                     Err(_) => { failed_count += 1; continue; }
                 };
 
-                if opts.symbols {
+                if opts.symbols && !comp.pins.is_empty() {
                     updated_sym = update_component_in_lib(
                         &updated_sym, lcsc_id, &comp,
                         &lib_name, hide_pin_numbers, hide_pin_names,
                     );
                 }
 
-                if opts.footprints {
+                if opts.footprints && !comp.pads.is_empty() {
                     // Find the existing .kicad_mod file that contains this LCSC ID.
                     // This is more reliable than package_name() which may differ between
                     // API calls (package_detail can change), causing a wrong filename.
