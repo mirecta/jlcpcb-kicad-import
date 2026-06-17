@@ -316,8 +316,8 @@ impl App {
 
             for (i, lcsc_id) in ids.iter().enumerate() {
                 let _ = tx.send(BgMsg::RefreshProgress(i + 1, total));
-                // Pace requests: each component = 3 API calls; 1 req/sec = 3s per component
-                if i > 0 { std::thread::sleep(std::time::Duration::from_secs(3)); }
+                // Pace requests: each component = 3 API calls; ~1 req/2sec = 5s per component
+                if i > 0 { std::thread::sleep(std::time::Duration::from_secs(5)); }
 
                 let comp = {
                     let mut c = match api::fetch_component(lcsc_id) {
