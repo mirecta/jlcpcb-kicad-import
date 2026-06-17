@@ -70,6 +70,24 @@ pub fn package_name(component: &Component) -> String {
     sanitize_name(raw)
 }
 
+/// Find an existing .kicad_mod file in fp_dir that contains this LCSC ID.
+/// Used to locate the correct file even when package_name() would give a different name.
+pub fn find_fp_by_lcsc(fp_dir: &Path, lcsc_id: &str) -> Option<PathBuf> {
+    let marker = format!("\"LCSC\" \"{}\"", lcsc_id);
+    let entries = std::fs::read_dir(fp_dir).ok()?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().map_or(false, |e| e == "kicad_mod") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if content.contains(&marker) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn write_footprint(
     paths: &LibPaths,
     component: &Component,
@@ -79,7 +97,12 @@ pub fn write_footprint(
     model_scale: [f32; 3],
     model_ext: &str,   // "step" or "wrl"
 ) -> Result<()> {
-    let name = package_name(component);
+    // Use existing file if found (handles package_name() mismatch between imports)
+    let existing = find_fp_by_lcsc(&paths.fp_dir, &component.lcsc_id);
+    let fp_file = existing.unwrap_or_else(|| {
+        paths.fp_dir.join(format!("{}.kicad_mod", package_name(component)))
+    });
+    let name = fp_file.file_stem().unwrap_or_default().to_string_lossy();
     let model_path = format!(
         "${{{lib_name}_3D}}/{name}.{ext}",
         lib_name = lib_name.to_uppercase().replace('-', "_"),
@@ -87,7 +110,6 @@ pub fn write_footprint(
         ext  = model_ext,
     );
     let content = build_footprint(component, &name, &model_path, model_offset, model_rotation, model_scale);
-    let fp_file = paths.fp_dir.join(format!("{}.kicad_mod", name));
     std::fs::write(&fp_file, content)?;
     Ok(())
 }
@@ -478,6 +500,8 @@ fn build_footprint(
   (version 20221018) (generator jlcpcb-kicad)
   (layer "F.Cu")
   (descr "{desc}")
+  (property "LCSC" "{lcsc}" (at 0 0) (layer "F.Fab") (hide yes)
+    (effects (font (size 1 1) (thickness 0.15))))
   (fp_text reference REF** (at 0 {ref_y:.6}) (layer "F.SilkS")
     (effects (font (size 1 1) (thickness 0.15))))
   (fp_text value {name} (at 0 {val_y:.6}) (layer "F.Fab")
@@ -492,6 +516,7 @@ fn build_footprint(
 )
 "#,
         name = name,
+        lcsc = c.lcsc_id,
         desc = esc(&c.description),
         ref_y = ref_y,
         val_y = val_y,

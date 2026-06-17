@@ -1663,3 +1663,4 @@ fn fetch_svgs(lcsc_id: &str) -> Result<Svgs> {
         .map(|s| s.to_string());
     Ok(Svgs { symbol, footprint })
 }
+
