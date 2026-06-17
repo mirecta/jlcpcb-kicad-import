@@ -306,19 +306,39 @@ impl App {
             for (i, lcsc_id) in ids.iter().enumerate() {
                 let _ = tx.send(BgMsg::RefreshProgress(i + 1, total));
 
-                let comp = match api::fetch_component(lcsc_id) {
-                    Ok(c) => c,
-                    Err(_) => { failed_count += 1; continue; }
+                let comp = {
+                    let mut c = match api::fetch_component(lcsc_id) {
+                        Ok(c) => c,
+                        Err(_) => { failed_count += 1; continue; }
+                    };
+                    // Retry up to 2x if we need pin/pad data but got none (API rate-limit)
+                    let need_sym = opts.symbols && c.pins.is_empty();
+                    let need_fp  = opts.footprints && c.pads.is_empty();
+                    if need_sym || need_fp {
+                        for _ in 0..2 {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            if let Ok(retry) = api::fetch_component(lcsc_id) {
+                                let got_sym = !retry.pins.is_empty();
+                                let got_fp  = !retry.pads.is_empty();
+                                if (!need_sym || got_sym) && (!need_fp || got_fp) {
+                                    c = retry;
+                                    break;
+                                }
+                                if got_sym || got_fp { c = retry; }
+                            }
+                        }
+                    }
+                    c
                 };
 
-                if opts.symbols && !comp.pins.is_empty() {
+                if opts.symbols {
                     updated_sym = update_component_in_lib(
                         &updated_sym, lcsc_id, &comp,
                         &lib_name, hide_pin_numbers, hide_pin_names,
                     );
                 }
 
-                if opts.footprints && !comp.pads.is_empty() {
+                if opts.footprints {
                     // Find the existing .kicad_mod file that contains this LCSC ID.
                     // This is more reliable than package_name() which may differ between
                     // API calls (package_detail can change), causing a wrong filename.
