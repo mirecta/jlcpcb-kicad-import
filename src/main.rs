@@ -327,49 +327,30 @@ impl App {
                     std::thread::sleep(std::time::Duration::from_secs(secs));
                 }
 
-                let comp = {
-                    let mut c = match api::fetch_component(lcsc_id) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            let _ = tx.send(BgMsg::RefreshStatus(
-                                format!("⚠ {} — download failed: {}", lcsc_id, e)
-                            ));
-                            failed_count += 1; continue;
-                        }
-                    };
-                    // Retry up to 2x if we need pin/pad data but got none (API rate-limit)
-                    let need_sym = opts.symbols && c.pins.is_empty();
-                    let need_fp  = opts.footprints && c.pads.is_empty();
-                    if need_sym || need_fp {
-                        let _ = tx.send(BgMsg::RefreshStatus(
-                            format!("⟳ {} — retrying (empty data, possible rate-limit)…", lcsc_id)
-                        ));
-                        for _ in 0..2 {
-                            std::thread::sleep(std::time::Duration::from_secs(2));
-                            if let Ok(retry) = api::fetch_component(lcsc_id) {
-                                let got_sym = !retry.pins.is_empty();
-                                let got_fp  = !retry.pads.is_empty();
-                                if (!need_sym || got_sym) && (!need_fp || got_fp) {
-                                    c = retry;
-                                    break;
-                                }
-                                if got_sym || got_fp { c = retry; }
-                            }
-                        }
-                        if (need_sym && c.pins.is_empty()) || (need_fp && c.pads.is_empty()) {
-                            let _ = tx.send(BgMsg::RefreshStatus(
-                                format!("⚠ {} — incomplete data after retries (no {})",
-                                    lcsc_id,
-                                    match (need_sym && c.pins.is_empty(), need_fp && c.pads.is_empty()) {
-                                        (true, true)  => "pins or pads",
-                                        (true, false) => "pins",
-                                        _             => "pads",
-                                    }
-                                )
-                            ));
-                        }
+                // Fetch with retry: fail → wait 30s → retry → fail → wait 60s → retry → give up
+                let fetch_result = {
+                    let delays = [30u64, 60];
+                    let mut result = api::fetch_component(lcsc_id);
+                    for (attempt, &wait) in delays.iter().enumerate() {
+                        if result.is_ok() { break; }
+                        let _ = tx.send(BgMsg::RefreshStatus(format!(
+                            "⟳ {} — failed, waiting {}s before retry {} of 2…",
+                            lcsc_id, wait, attempt + 1
+                        )));
+                        std::thread::sleep(std::time::Duration::from_secs(wait));
+                        result = api::fetch_component(lcsc_id);
                     }
-                    c
+                    result
+                };
+
+                let comp = match fetch_result {
+                    Err(e) => {
+                        let _ = tx.send(BgMsg::RefreshStatus(
+                            format!("⚠ {} — download failed after 3 attempts: {}", lcsc_id, e)
+                        ));
+                        failed_count += 1; continue;
+                    }
+                    Ok(c) => c,
                 };
 
                 if opts.symbols {
