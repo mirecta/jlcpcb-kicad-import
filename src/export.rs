@@ -116,15 +116,21 @@ pub fn write_footprint(
     Ok(())
 }
 
+fn model_stem(paths: &LibPaths, component: &Component) -> String {
+    find_fp_by_lcsc(&paths.fp_dir, &component.lcsc_id)
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| package_name(component))
+}
+
 pub fn write_wrl_model(paths: &LibPaths, component: &Component, wrl_bytes: &[u8]) -> Result<()> {
-    let f = paths.model_dir.join(format!("{}.wrl", package_name(component)));
-    std::fs::write(&f, wrl_bytes)?;
+    let stem = model_stem(paths, component);
+    std::fs::write(paths.model_dir.join(format!("{}.wrl", stem)), wrl_bytes)?;
     Ok(())
 }
 
 pub fn write_step_model(paths: &LibPaths, component: &Component, step_bytes: &[u8]) -> Result<()> {
-    let f = paths.model_dir.join(format!("{}.step", package_name(component)));
-    std::fs::write(&f, step_bytes)?;
+    let stem = model_stem(paths, component);
+    std::fs::write(paths.model_dir.join(format!("{}.step", stem)), step_bytes)?;
     Ok(())
 }
 
