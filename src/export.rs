@@ -308,6 +308,16 @@ fn esc_pin(s: &str) -> String {
 
 // ── Footprint builder ─────────────────────────────────────────────────────────
 
+pub fn build_footprint_content(
+    component: &Component,
+    model_path: &str,
+    model_offset: [f32; 3],
+    model_rotation: [f32; 3],
+    model_scale: [f32; 3],
+) -> String {
+    build_footprint(component, model_path, model_offset, model_rotation, model_scale)
+}
+
 fn build_footprint(
     c: &Component,
     model_path: &str,

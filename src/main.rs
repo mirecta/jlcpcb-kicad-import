@@ -325,8 +325,14 @@ impl App {
                 }
 
                 if opts.footprints {
-                    let pkg = export::package_name(&comp);
-                    let fp_path = paths.fp_dir.join(format!("{}.kicad_mod", pkg));
+                    // Find the existing .kicad_mod file that contains this LCSC ID.
+                    // This is more reliable than package_name() which may differ between
+                    // API calls (package_detail can change), causing a wrong filename.
+                    let existing_fp_path = find_fp_by_lcsc(&paths.fp_dir, lcsc_id);
+                    let fp_path = existing_fp_path.unwrap_or_else(|| {
+                        paths.fp_dir.join(format!("{}.kicad_mod", export::package_name(&comp)))
+                    });
+
                     let (offset, rotation, scale) = if opts.keep_3d_settings {
                         if let Ok(existing) = fs::read_to_string(&fp_path) {
                             extract_3d_settings(&existing)
@@ -336,8 +342,18 @@ impl App {
                     } else {
                         ([0.0f32;3], [0.0f32;3], [1.0f32,1.0,1.0])
                     };
-                    let model_ext = if paths.model_dir.join(format!("{}.wrl", pkg)).exists() { "wrl" } else { "step" };
-                    if export::write_footprint(&paths, &comp, &lib_name, offset, rotation, scale, model_ext).is_err() {
+
+                    // Detect model format from existing model dir
+                    let stem = fp_path.file_stem().unwrap_or_default().to_string_lossy();
+                    let model_ext = if paths.model_dir.join(format!("{}.wrl", stem)).exists() { "wrl" } else { "step" };
+
+                    // Build and write footprint content directly to the resolved path
+                    let model_path = format!(
+                        "${{{}_3D}}/{}.{}",
+                        lib_name.to_uppercase().replace('-', "_"), stem, model_ext
+                    );
+                    let content = export::build_footprint_content(&comp, &model_path, offset, rotation, scale);
+                    if fs::write(&fp_path, content).is_err() {
                         failed_count += 1; continue;
                     }
                 }
@@ -2137,6 +2153,23 @@ fn update_component_in_lib(
 }
 
 
+
+/// Find the .kicad_mod file in fp_dir whose LCSC property matches lcsc_id.
+fn find_fp_by_lcsc(fp_dir: &std::path::Path, lcsc_id: &str) -> Option<std::path::PathBuf> {
+    let marker = format!("\"LCSC\" \"{}\"", lcsc_id);
+    let entries = std::fs::read_dir(fp_dir).ok()?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().map_or(false, |e| e == "kicad_mod") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if content.contains(&marker) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
 
 fn extract_3d_settings(content: &str) -> ([f32;3], [f32;3], [f32;3]) {
     let parse_xyz = |label: &str| -> [f32;3] {
