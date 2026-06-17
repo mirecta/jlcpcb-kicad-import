@@ -968,7 +968,6 @@ fn ee_layer_to_kicad(layer: i32) -> Option<&'static str> {
         12         => Some("F.Fab"),
         13         => Some("F.CrtYd"),
         14         => Some("B.CrtYd"),
-        99|100|101 => Some("User.Comments"),
         _          => None,
     }
 }
