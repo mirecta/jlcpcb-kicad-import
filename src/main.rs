@@ -316,8 +316,16 @@ impl App {
 
             for (i, lcsc_id) in ids.iter().enumerate() {
                 let _ = tx.send(BgMsg::RefreshProgress(i + 1, total));
-                // Pace requests: each component = 3 API calls; ~1 req/2sec = 5s per component
-                if i > 0 { std::thread::sleep(std::time::Duration::from_secs(5)); }
+                // Randomized delay 10–15s between components to avoid rate-limiting patterns
+                if i > 0 {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    (i as u64).hash(&mut h);
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default().subsec_nanos().hash(&mut h);
+                    let secs = 10 + (h.finish() % 6); // 10..=15
+                    std::thread::sleep(std::time::Duration::from_secs(secs));
+                }
 
                 let comp = {
                     let mut c = match api::fetch_component(lcsc_id) {
