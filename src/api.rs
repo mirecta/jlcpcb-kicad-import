@@ -615,8 +615,21 @@ fn parse_svg_d(d: &str) -> Vec<(Vec<(f32, f32)>, bool)> {
 }
 
 /// Parse "M x y A rx ry xrot fa fs x2 y2" from an EasyEDA A~ path string.
+/// EasyEDA emits these with no space after the command letter and commas
+/// between coordinates (e.g. "M19.44,6.9 A10,10 0 0 1 19.53,-7.03"), so
+/// normalise the same way `parse_svg_d` does before tokenising.
 fn parse_ee_arc(path: &str) -> Option<([f32;2], f32, f32, bool, bool, [f32;2])> {
-    let t: Vec<&str> = path.split_whitespace().collect();
+    let mut expanded = String::with_capacity(path.len() * 2);
+    for c in path.chars() {
+        if c.is_ascii_alphabetic() {
+            expanded.push(' '); expanded.push(c); expanded.push(' ');
+        } else if c == ',' {
+            expanded.push(' ');
+        } else {
+            expanded.push(c);
+        }
+    }
+    let t: Vec<&str> = expanded.split_whitespace().collect();
     let mi = t.iter().position(|s| *s == "M")?;
     let ai = t.iter().position(|s| *s == "A")?;
     if ai < mi + 3 || t.len() < ai + 8 { return None; }
@@ -1677,5 +1690,34 @@ mod c3013946_tests {
             [0.0,0.0,0.0],[0.0,0.0,0.0],[1.0,1.0,1.0],
         );
         std::fs::write("/tmp/our_esp32s3.kicad_mod", &content).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod c2887271_tests {
+    use super::*;
+
+    /// Polarized electrolytic cap symbol: its curved (negative) plate is an
+    /// "A~M19.44,6.9 A10,10 0 0 1 19.53,-7.03~..." arc shape whose SVG path has
+    /// no space after the command letters and comma-separated coordinates.
+    /// `parse_ee_arc` used to require whitespace-delimited "M"/"A" tokens and
+    /// silently dropped the arc, so the symbol rendered with only the flat plate.
+    #[test]
+    fn test_capacitor_curved_plate_arc_present() {
+        let comp = fetch_component("C2887271").expect("fetch C2887271");
+        let arc_count = comp.sym_graphics.iter()
+            .filter(|g| matches!(g, SymGraphic::Arc { .. }))
+            .count();
+        assert_eq!(arc_count, 1, "expected curved plate arc in sym_graphics: {:?}", comp.sym_graphics);
+    }
+
+    #[test]
+    fn test_parse_ee_arc_no_space_comma_form() {
+        let path = "M19.44,6.9 A10,10 0 0 1 19.53,-7.03";
+        let ([x1, y1], rx, ry, fa, fs, [x2, y2]) = parse_ee_arc(path).expect("parse arc");
+        assert_eq!((x1, y1), (19.44, 6.9));
+        assert_eq!((rx, ry), (10.0, 10.0));
+        assert_eq!((fa, fs), (false, true));
+        assert_eq!((x2, y2), (19.53, -7.03));
     }
 }
