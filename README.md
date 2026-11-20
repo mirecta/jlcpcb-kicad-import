@@ -108,8 +108,6 @@ It uses the same settings file as the GUI (library folder / name), and every too
 | `render_3d` | Render the 3D model on its footprint (iso / top / front / … views), optionally previewing an unsaved transform |
 | `save_datasheet` | Download the datasheet PDF |
 
-`import_part` / `refresh_parts` refuse to write into a library whose symbols use a differently named footprint library (they would create `<lib>.pretty` next to it) unless `allow_mixed_layout` is set.
-
 ## Output files
 
 | File | Location |

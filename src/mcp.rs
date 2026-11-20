@@ -258,7 +258,6 @@ impl Server {
     fn import_part(&mut self, a: &Value) -> Result<Vec<Value>> {
         let lcsc = req_str(a, "lcsc")?.to_string();
         let (lib_path, lib_name) = lib_target(a);
-        check_layout(&lib_path, &lib_name, a)?;
         let b = |k: &str, d: bool| a.get(k).and_then(|v| v.as_bool()).unwrap_or(d);
         let (c, wrl, step, warn) = self.fetch(&lcsc, true)?.clone();
         let cat = c.category.to_lowercase();
@@ -288,7 +287,6 @@ impl Server {
 
     fn refresh_parts(&mut self, a: &Value) -> Result<Vec<Value>> {
         let (lib_path, lib_name) = lib_target(a);
-        check_layout(&lib_path, &lib_name, a)?;
         let ids: Vec<String> = a.get("lcsc").and_then(|v| v.as_array())
             .ok_or_else(|| anyhow!("'lcsc' must be an array of LCSC ids"))?
             .iter().filter_map(|v| v.as_str().map(String::from)).collect();
@@ -532,28 +530,6 @@ fn layout_info(lib_path: &str, lib_name: &str) -> Vec<Value> {
     seen.into_iter().map(|(n, d, c)| json!({"nickname": n, "folder": d, "symbols": c})).collect()
 }
 
-/// Import/refresh write `<lib>.pretty` and reference footprints as `<lib_name>:…`.
-/// Refuse if the existing library keeps its footprints elsewhere.
-fn check_layout(lib_path: &str, lib_name: &str, a: &Value) -> Result<()> {
-    if a.get("allow_mixed_layout").and_then(|v| v.as_bool()).unwrap_or(false) {
-        return Ok(());
-    }
-    let Ok(l) = library::load(lib_path, lib_name) else { return Ok(()) };
-    let foreign: HashSet<&str> = l.entries.iter()
-        .filter(|e| e.fp_foreign_lib)
-        .filter_map(|e| e.footprint.split_once(':').map(|(n, _)| n))
-        .collect();
-    if !foreign.is_empty() {
-        bail!(
-            "library '{lib_name}' keeps its footprints in other footprint libraries ({}), but this tool \
-             writes footprints to {}/{lib_name}.pretty and references them as '{lib_name}:…'. \
-             That would mix two layouts. Pass allow_mixed_layout=true only if that is really intended.",
-            foreign.into_iter().collect::<Vec<_>>().join(", "), lib_path
-        );
-    }
-    Ok(())
-}
-
 fn find_entry(a: &Value) -> Result<LibEntry> {
     let (lib_path, lib_name) = lib_target(a);
     let l = library::load(&lib_path, &lib_name)?;
@@ -700,8 +676,7 @@ fn tool_list() -> Value {
                 "footprint": {"type": "boolean", "default": true},
                 "model_3d": {"type": "boolean", "default": true},
                 "hide_pin_numbers": {"type": "boolean", "default": false},
-                "hide_pin_names": {"type": "boolean", "description": "Default: true for passives/crystals"},
-                "allow_mixed_layout": {"type": "boolean", "description": "Import even if the library keeps footprints in a differently named footprint library"}})))},
+                "hide_pin_names": {"type": "boolean", "description": "Default: true for passives/crystals"}})))},
             "annotations": {"destructiveHint": true, "openWorldHint": true}}),
         json!({"name": "refresh_parts", "title": "Refresh parts from JLCPCB",
             "description": "Regenerate already-imported parts from fresh JLCPCB data (max 10 per call). Keeps the 3D transform by default.",
@@ -712,8 +687,7 @@ fn tool_list() -> Value {
                 "model_3d": {"type": "boolean", "default": true},
                 "keep_3d_settings": {"type": "boolean", "default": true},
                 "hide_pin_numbers": {"type": "boolean", "default": false},
-                "hide_pin_names": {"type": "boolean", "default": false},
-                "allow_mixed_layout": {"type": "boolean"}}))},
+                "hide_pin_names": {"type": "boolean", "default": false}}))},
             "annotations": {"destructiveHint": true, "openWorldHint": true}}),
         json!({"name": "get_3d_transform", "title": "Get 3D model transform",
             "description": "Read the 3D model offset / rotation / scale stored in a library footprint.",
