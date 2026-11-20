@@ -21,7 +21,9 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 const INSTRUCTIONS: &str = "\
 JLCPCB → KiCad library manager. Typical flow: search_parts → get_part → import_part.
 The target library comes from the app settings (get_library_config / set_library_config);
-every tool also accepts lib_path + lib_name to override it for one call.
+every tool also accepts lib_path + lib_name to override it for one call. The footprint
+library may have a different name/folder than the symbol library (fp_lib_name, fp_dir,
+model_dir); by default it has the same name.
 3D placement: render_3d renders exactly like the app's 3D viewer (same camera presets as its
 buttons: iso, top, bottom, front, back, left, right; red/green/blue axes are X/Y/Z). Preview changes with render_3d's
 offset/rotation/scale arguments, then persist with set_3d_transform. Rotation values are
@@ -151,7 +153,8 @@ impl Server {
     // ── tools ────────────────────────────────────────────────────────────────
 
     fn get_library_config(&mut self, a: &Value) -> Result<Vec<Value>> {
-        let (lib_path, lib_name) = lib_target(a);
+        let paths = lib_target(a);
+        let (lib_path, lib_name) = (paths.lib_path.to_string_lossy().to_string(), paths.sym_name.clone());
         let scan = settings::scan_library_dir(&lib_path);
         let mut warnings = Vec::new();
         if let Some((dir, name)) = &scan.suggested_parent {
@@ -164,11 +167,21 @@ impl Server {
         for (dir, names) in &scan.child_dirs {
             warnings.push(format!("libraries found in sub-folder {dir}: {}", names.join(", ")));
         }
-        let layout = layout_info(&lib_path, &lib_name);
+        let layout = layout_info(&paths);
         Ok(vec![json_text(&json!({
             "lib_path": lib_path,
             "lib_name": lib_name,
-            "symbol_file": LibPaths::new(&lib_path, &lib_name).sym_file,
+            "symbol_file": paths.sym_file,
+            "footprint_library": {
+                "name": paths.fp_nick,
+                "folder": paths.fp_dir,
+                "model_dir": paths.model_dir,
+                "model_path_in_footprint": paths.model_ref("<name>", "step"),
+                "kicad_path_variable": paths.model_var(),
+            },
+            "detected_footprint_library": library::detect_layout(&lib_path, &lib_name).map(|d| json!({
+                "name": d.nick, "folder": d.fp_dir, "model_dir": d.model_dir, "symbols": d.symbols
+            })),
             "libraries_in_folder": scan.libs.iter().map(|l| json!({
                 "name": l.name, "symbols": l.has_sym, "footprints": l.has_fp, "models_3d": l.has_3d
             })).collect::<Vec<_>>(),
@@ -179,14 +192,8 @@ impl Server {
     }
 
     fn set_library_config(&mut self, a: &Value) -> Result<Vec<Value>> {
-        let mut s = settings::load();
-        if let Some(p) = a.get("pick").and_then(|v| v.as_str()) {
-            let (dir, name) = settings::resolve_pick(Path::new(p));
-            s.lib_path = dir.to_string_lossy().to_string();
-            if let Some(n) = name { s.lib_name = n; }
-        }
-        if let Some(p) = a.get("lib_path").and_then(|v| v.as_str()) { s.lib_path = p.trim().to_string(); }
-        if let Some(n) = a.get("lib_name").and_then(|v| v.as_str()) { s.lib_name = n.trim().to_string(); }
+        let mut s = settings::load_effective();
+        apply_lib_args(&mut s, a);
         if let Some(d) = a.get("datasheet_dir").and_then(|v| v.as_str()) { s.datasheet_dir = d.trim().to_string(); }
         if s.lib_name.is_empty() { bail!("library name is empty"); }
         settings::save(&s)?;
@@ -208,9 +215,9 @@ impl Server {
 
     fn get_part(&mut self, a: &Value) -> Result<Vec<Value>> {
         let lcsc = req_str(a, "lcsc")?.to_string();
-        let (lib_path, lib_name) = lib_target(a);
+        let paths = lib_target(a);
         let (c, _, _, warn) = self.fetch(&lcsc, false)?.clone();
-        let in_lib = library::load(&lib_path, &lib_name).ok()
+        let in_lib = library::load(&paths).ok()
             .and_then(|l| l.entries.into_iter().find(|e| e.lcsc == c.lcsc_id));
         Ok(vec![json_text(&json!({
             "lcsc": c.lcsc_id, "part": c.value, "value": export::electrical_value(&c),
@@ -229,10 +236,10 @@ impl Server {
     }
 
     fn list_library(&mut self, a: &Value) -> Result<Vec<Value>> {
-        let (lib_path, lib_name) = lib_target(a);
-        let lib = library::load(&lib_path, &lib_name)?;
+        let paths = lib_target(a);
+        let lib = library::load(&paths)?;
         if !lib.sym_exists {
-            bail!("symbol library {} does not exist", LibPaths::new(&lib_path, &lib_name).sym_file.display());
+            bail!("symbol library {} does not exist", paths.clone().sym_file.display());
         }
         let f = a.get("filter").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
         let only_problems = a.get("only_problems").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -243,7 +250,7 @@ impl Server {
             .map(entry_json)
             .collect();
         Ok(vec![json_text(&json!({
-            "library": LibPaths::new(&lib_path, &lib_name).sym_file,
+            "library": paths.clone().sym_file,
             "project_dir": lib.project_dir,
             "total": lib.entries.len(),
             "shown": entries.len(),
@@ -257,7 +264,7 @@ impl Server {
 
     fn import_part(&mut self, a: &Value) -> Result<Vec<Value>> {
         let lcsc = req_str(a, "lcsc")?.to_string();
-        let (lib_path, lib_name) = lib_target(a);
+        let paths = lib_target(a);
         let b = |k: &str, d: bool| a.get(k).and_then(|v| v.as_bool()).unwrap_or(d);
         let (c, wrl, step, warn) = self.fetch(&lcsc, true)?.clone();
         let cat = c.category.to_lowercase();
@@ -271,8 +278,8 @@ impl Server {
             hide_pin_names: b("hide_pin_names", passive),
             transform: transform_arg(a, ModelTransform::default())?,
         };
-        ops::import_component(&lib_path, &lib_name, &c, wrl.as_deref(), step.as_deref(), &opts)?;
-        let paths = LibPaths::new(&lib_path, &lib_name);
+        ops::import_component(&paths, &c, wrl.as_deref(), step.as_deref(), &opts)?;
+        let paths = paths.clone();
         let fp = export::find_fp_by_lcsc(&paths.fp_dir, &c.lcsc_id);
         Ok(vec![json_text(&json!({
             "imported": c.lcsc_id, "part": c.value,
@@ -286,7 +293,7 @@ impl Server {
     }
 
     fn refresh_parts(&mut self, a: &Value) -> Result<Vec<Value>> {
-        let (lib_path, lib_name) = lib_target(a);
+        let paths = lib_target(a);
         let ids: Vec<String> = a.get("lcsc").and_then(|v| v.as_array())
             .ok_or_else(|| anyhow!("'lcsc' must be an array of LCSC ids"))?
             .iter().filter_map(|v| v.as_str().map(String::from)).collect();
@@ -299,7 +306,7 @@ impl Server {
             models_3d: b("model_3d", true),
             keep_3d_settings: b("keep_3d_settings", true),
         };
-        let paths = LibPaths::new(&lib_path, &lib_name);
+        let paths = paths.clone();
         let mut sym = std::fs::read_to_string(&paths.sym_file)
             .map_err(|e| anyhow!("cannot read {}: {e}", paths.sym_file.display()))?;
         let mut written = HashSet::new();
@@ -309,7 +316,7 @@ impl Server {
             let id = normalize_lcsc(id)?;
             self.cache.remove(&id);
             let r = ops::fetch_component(&id).and_then(|(c, _)| {
-                ops::refresh_component(&paths, &lib_name, &c, &opts, b("hide_pin_numbers", false), b("hide_pin_names", false), &mut sym, &mut written)?;
+                ops::refresh_component(&paths, &c, &opts, b("hide_pin_numbers", false), b("hide_pin_names", false), &mut sym, &mut written)?;
                 if opts.symbols { std::fs::write(&paths.sym_file, &sym)?; }
                 Ok(c.value)
             });
@@ -366,8 +373,9 @@ impl Server {
 
     fn render_3d(&mut self, a: &Value) -> Result<Vec<Value>> {
         let lcsc = req_str(a, "lcsc")?.to_string();
-        let (lib_path, lib_name) = lib_target(a);
-        let entry = library::load(&lib_path, &lib_name).ok()
+        let paths = lib_target(a);
+        let lib_name = paths.sym_name.clone();
+        let entry = library::load(&paths).ok()
             .and_then(|l| l.entries.into_iter().find(|e| e.lcsc.eq_ignore_ascii_case(&lcsc)));
         let source = a.get("source").and_then(|v| v.as_str())
             .unwrap_or(if entry.is_some() { "library" } else { "jlcpcb" }).to_string();
@@ -509,16 +517,40 @@ fn normalize_lcsc(s: &str) -> Result<String> {
     Ok(s)
 }
 
-fn lib_target(a: &Value) -> (String, String) {
-    let s = settings::load();
-    let p = a.get("lib_path").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or(s.lib_path);
-    let n = a.get("lib_name").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or(s.lib_name);
-    (p, n)
+/// Library targeted by a call: app settings, with per-call overrides.
+/// Overriding lib_path/lib_name auto-detects that library's footprint layout
+/// (like picking it in the GUI); fp_lib_name / fp_dir / model_dir override it.
+fn lib_target(a: &Value) -> LibPaths {
+    let mut s = settings::load_effective();
+    apply_lib_args(&mut s, a);
+    s.paths()
+}
+
+fn apply_lib_args(s: &mut settings::Settings, a: &Value) {
+    let st = |k: &str| a.get(k).and_then(|v| v.as_str()).map(|v| v.trim().to_string());
+    let mut relocated = false;
+    if let Some(p) = st("pick") {
+        let (dir, name) = settings::resolve_pick(Path::new(&p));
+        s.lib_path = dir.to_string_lossy().to_string();
+        if let Some(n) = name { s.lib_name = n; }
+        relocated = true;
+    }
+    if let Some(p) = st("lib_path") { s.lib_path = p; relocated = true; }
+    if let Some(n) = st("lib_name") { s.lib_name = n; relocated = true; }
+    if relocated {
+        s.apply_layout(library::detect_layout(&s.lib_path, &s.lib_name).as_ref());
+    }
+    if a.get("same_as_symbol_library").and_then(|v| v.as_bool()) == Some(true) {
+        s.apply_layout(None);
+    }
+    if let Some(v) = st("fp_lib_name") { s.fp_lib_name = v; }
+    if let Some(v) = st("fp_dir") { s.fp_dir = v; }
+    if let Some(v) = st("model_dir") { s.model_dir = v; }
 }
 
 /// Footprint libraries referenced by the symbols, with the folder they resolve to.
-fn layout_info(lib_path: &str, lib_name: &str) -> Vec<Value> {
-    let Ok(l) = library::load(lib_path, lib_name) else { return vec![] };
+fn layout_info(paths: &LibPaths) -> Vec<Value> {
+    let Ok(l) = library::load(paths) else { return vec![] };
     let mut seen: Vec<(String, Option<PathBuf>, usize)> = Vec::new();
     for e in &l.entries {
         let nick = e.footprint.split_once(':').map(|(n, _)| n.to_string()).unwrap_or_default();
@@ -531,8 +563,9 @@ fn layout_info(lib_path: &str, lib_name: &str) -> Vec<Value> {
 }
 
 fn find_entry(a: &Value) -> Result<LibEntry> {
-    let (lib_path, lib_name) = lib_target(a);
-    let l = library::load(&lib_path, &lib_name)?;
+    let paths = lib_target(a);
+        let lib_name = paths.sym_name.clone();
+    let l = library::load(&paths)?;
     if let Some(id) = a.get("lcsc").and_then(|v| v.as_str()) {
         let id = normalize_lcsc(id)?;
         return l.entries.into_iter().find(|e| e.lcsc == id)
@@ -623,7 +656,10 @@ fn base64(data: &[u8]) -> String {
 fn tool_list() -> Value {
     let lib = json!({
         "lib_path": {"type": "string", "description": "Library folder (default: app settings)"},
-        "lib_name": {"type": "string", "description": "Library name (default: app settings)"},
+        "lib_name": {"type": "string", "description": "Symbol library name (default: app settings)"},
+        "fp_lib_name": {"type": "string", "description": "Footprint library name if different from the symbol library (default: settings, or auto-detected when lib_path/lib_name is given)"},
+        "fp_dir": {"type": "string", "description": "Footprint library folder (default: <lib_path>/<fp_lib_name>.pretty)"},
+        "model_dir": {"type": "string", "description": "3D model folder (default: <lib_path>/<fp_lib_name>.3dshapes)"},
     });
     let vec3 = |d: &str| json!({"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3, "description": d});
     let with_lib = |mut props: Value| { for (k, v) in lib.as_object().unwrap() { props[k] = v.clone(); } props };
@@ -641,10 +677,14 @@ fn tool_list() -> Value {
             "inputSchema": {"type": "object", "properties": with_lib(json!({}))},
             "annotations": {"readOnlyHint": true}}),
         json!({"name": "set_library_config", "title": "Set library configuration",
-            "description": "Change the target library saved in the app settings (shared with the GUI). 'pick' accepts any path related to a library — a .kicad_sym file, a .pretty/.3dshapes folder or the folder containing them — and detects folder + name automatically.",
+            "description": "Change the target library saved in the app settings (shared with the GUI). Symbol and footprint libraries may differ in name and folder (default: same). 'pick' accepts any path related to a library — a .kicad_sym file, a .pretty/.3dshapes folder or the folder containing them — and detects folder + name automatically.",
             "inputSchema": {"type": "object", "properties": {
-                "pick": {"type": "string", "description": "Path to a .kicad_sym / .pretty / library folder — auto-detects lib_path and lib_name"},
+                "pick": {"type": "string", "description": "Path to a .kicad_sym / .pretty / library folder — auto-detects lib_path, lib_name and the footprint library"},
                 "lib_path": {"type": "string"}, "lib_name": {"type": "string"},
+                "fp_lib_name": {"type": "string", "description": "Footprint library name (nickname used in symbols)"},
+                "fp_dir": {"type": "string", "description": "Footprint library folder"},
+                "model_dir": {"type": "string", "description": "3D model folder"},
+                "same_as_symbol_library": {"type": "boolean", "description": "Reset footprints/3D to the default: same name and folder as the symbol library"},
                 "datasheet_dir": {"type": "string", "description": "Default folder for save_datasheet"}}}}),
         json!({"name": "search_parts", "title": "Search JLCPCB parts",
             "description": "Search the JLCPCB catalog by keyword, value, MPN or LCSC id (e.g. 'ULN2003', '100nF 0402', 'C7512').",
@@ -669,7 +709,7 @@ fn tool_list() -> Value {
                 "only_problems": {"type": "boolean", "description": "Only entries with missing footprint or 3D model"}}))},
             "annotations": {"readOnlyHint": true}}),
         json!({"name": "import_part", "title": "Import part into library",
-            "description": "Download a JLCPCB part and write its symbol (<lib>.kicad_sym), footprint (<lib>.pretty) and 3D models (<lib>.3dshapes). Existing symbol/footprint for the same part is replaced. Optional initial 3D transform.",
+            "description": "Download a JLCPCB part and write its symbol into the symbol library, its footprint into the footprint library and 3D models into the 3D folder (see get_library_config). Existing symbol/footprint for the same part is replaced. Optional initial 3D transform.",
             "inputSchema": {"type": "object", "required": ["lcsc"], "properties": with_lib(transform(json!({
                 "lcsc": lcsc,
                 "symbol": {"type": "boolean", "default": true},

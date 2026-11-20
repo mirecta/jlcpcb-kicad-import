@@ -6,6 +6,15 @@ use std::path::{Path, PathBuf};
 pub struct Settings {
     pub lib_path: String,
     pub lib_name: String,
+    /// Footprint library nickname — empty = same as lib_name.
+    #[serde(default)]
+    pub fp_lib_name: String,
+    /// Footprint library folder — empty = <lib_path>/<footprint name>.pretty
+    #[serde(default)]
+    pub fp_dir: String,
+    /// 3D model folder — empty = <lib_path>/<footprint name>.3dshapes
+    #[serde(default)]
+    pub model_dir: String,
     /// Last folder a datasheet was saved to.
     #[serde(default)]
     pub datasheet_dir: String,
@@ -21,7 +30,37 @@ impl Default for Settings {
                 .to_string_lossy()
                 .to_string(),
             lib_name: "local_lib".to_string(),
+            fp_lib_name: String::new(),
+            fp_dir: String::new(),
+            model_dir: String::new(),
             datasheet_dir: String::new(),
+        }
+    }
+}
+
+impl Settings {
+    pub fn paths(&self) -> crate::export::LibPaths {
+        crate::export::LibPaths::with_footprints(&self.lib_path, &self.lib_name, &self.fp_lib_name, &self.fp_dir, &self.model_dir)
+    }
+
+    /// True when footprints/3D use the default name and location.
+    pub fn fp_is_default(&self) -> bool {
+        self.fp_lib_name.trim().is_empty() && self.fp_dir.trim().is_empty() && self.model_dir.trim().is_empty()
+    }
+
+    /// Adopt a detected footprint layout (or reset to defaults with None).
+    pub fn apply_layout(&mut self, l: Option<&crate::library::FpLayout>) {
+        match l {
+            Some(l) => {
+                self.fp_lib_name = l.nick.clone();
+                self.fp_dir = l.fp_dir.to_string_lossy().to_string();
+                self.model_dir = l.model_dir.as_ref().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+            }
+            None => {
+                self.fp_lib_name.clear();
+                self.fp_dir.clear();
+                self.model_dir.clear();
+            }
         }
     }
 }
@@ -63,6 +102,25 @@ pub fn load() -> Settings {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// Settings with the footprint layout filled in: when footprints are left at the
+/// default but the symbol library already references another footprint library
+/// (resolved via fp-lib-table), use that one.
+pub fn load_effective() -> Settings {
+    let mut s = load();
+    s.fill_detected_layout();
+    s
+}
+
+impl Settings {
+    pub fn fill_detected_layout(&mut self) {
+        if self.fp_is_default() {
+            if let Some(l) = crate::library::detect_layout(&self.lib_path, &self.lib_name) {
+                self.apply_layout(Some(&l));
+            }
+        }
+    }
 }
 
 pub fn save(settings: &Settings) -> Result<()> {

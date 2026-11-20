@@ -58,11 +58,10 @@ fn mtime(p: &Path) -> u128 {
 }
 
 /// Change-detection key: symbol file + mtimes of the related folders.
-pub fn cache_key(lib_path: &str, lib_name: &str) -> String {
-    let p = LibPaths::new(lib_path, lib_name);
-    let proj = find_project_dir(Path::new(lib_path));
+pub fn cache_key(p: &LibPaths) -> String {
+    let proj = find_project_dir(&p.lib_path);
     let proj_mt = proj.as_ref().map(|d| mtime(&d.join("fp-lib-table"))).unwrap_or(0);
-    format!("{}|{}|{}|{}|{}", p.sym_file.display(), mtime(&p.sym_file), mtime(&p.fp_dir), mtime(&p.model_dir), proj_mt)
+    format!("{}|{}|{}|{}|{}|{}|{}", p.sym_file.display(), p.fp_dir.display(), p.model_dir.display(), mtime(&p.sym_file), mtime(&p.fp_dir), mtime(&p.model_dir), proj_mt)
 }
 
 /// Walk up from `start` to the first folder containing `fp-lib-table` or a `.kicad_pro`.
@@ -173,8 +172,8 @@ fn model_ref(fp_file: &Path) -> Option<String> {
     r
 }
 
-pub fn load(lib_path: &str, lib_name: &str) -> Result<LibContents> {
-    let paths = LibPaths::new(lib_path, lib_name);
+pub fn load(paths: &LibPaths) -> Result<LibContents> {
+    let lib_name = paths.fp_nick.as_str();
     let mut out = LibContents::default();
     if !paths.sym_file.is_file() {
         return Ok(out);
@@ -182,12 +181,12 @@ pub fn load(lib_path: &str, lib_name: &str) -> Result<LibContents> {
     out.sym_exists = true;
 
     // Resolve footprint library nicknames like KiCad does
-    out.project_dir = find_project_dir(Path::new(lib_path));
+    out.project_dir = find_project_dir(&paths.lib_path);
     let vars = path_vars(out.project_dir.as_deref());
     let mut fp_libs: HashMap<String, PathBuf> = HashMap::new();
     if let Some(p) = &out.project_dir { read_fp_lib_table(&p.join("fp-lib-table"), &vars, &mut fp_libs); }
     if let Some(c) = kicad_config_dir() { read_fp_lib_table(&c.join("fp-lib-table"), &vars, &mut fp_libs); }
-    // This app's own convention: <lib_path>/<lib_name>.pretty
+    // Configured footprint library (default: <lib_path>/<lib_name>.pretty)
     fp_libs.entry(lib_name.to_string()).or_insert_with(|| paths.fp_dir.clone());
 
     let mut dir_index: HashMap<PathBuf, HashMap<String, PathBuf>> = HashMap::new();
@@ -222,11 +221,11 @@ pub fn load(lib_path: &str, lib_name: &str) -> Result<LibContents> {
                         e.fp_file = None;
                         // still inspect the real file for its 3D model
                         let actual = actual.clone();
-                        check_model(&mut e, &actual, dir, out.project_dir.as_deref(), &vars, &paths);
+                        check_model(&mut e, &actual, dir, out.project_dir.as_deref(), &vars, paths);
                     }
                 }
                 if let Some(f) = e.fp_file.clone() {
-                    check_model(&mut e, &f, dir, out.project_dir.as_deref(), &vars, &paths);
+                    check_model(&mut e, &f, dir, out.project_dir.as_deref(), &vars, paths);
                 }
             }
         }
@@ -252,6 +251,44 @@ pub fn load(lib_path: &str, lib_name: &str) -> Result<LibContents> {
     orphans.sort();
     out.orphan_footprints = orphans;
     Ok(out)
+}
+
+/// Footprint library actually used by the symbols of a library.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FpLayout {
+    pub nick: String,
+    pub fp_dir: PathBuf,
+    /// Folder holding most of the 3D models of those footprints.
+    pub model_dir: Option<PathBuf>,
+    pub symbols: usize,
+}
+
+/// Detect the footprint library (+ 3D folder) that most symbols of the symbol
+/// library reference, resolved via fp-lib-table. None if the library is empty
+/// or uses the default layout.
+pub fn detect_layout(lib_path: &str, lib_name: &str) -> Option<FpLayout> {
+    let c = load(&LibPaths::new(lib_path, lib_name)).ok()?;
+    let mut counts: HashMap<(String, PathBuf), usize> = HashMap::new();
+    for e in &c.entries {
+        if let (Some((nick, _)), Some(dir)) = (e.footprint.split_once(':'), &e.fp_lib_dir) {
+            *counts.entry((nick.to_string(), dir.clone())).or_default() += 1;
+        }
+    }
+    let ((nick, fp_dir), symbols) = counts.into_iter().max_by_key(|(_, n)| *n)?;
+    let mut mdirs: HashMap<PathBuf, usize> = HashMap::new();
+    for e in &c.entries {
+        if e.footprint.split_once(':').map(|(n, _)| n) == Some(nick.as_str()) {
+            if let Some(d) = e.model_file.as_ref().and_then(|f| f.parent()) {
+                *mdirs.entry(d.to_path_buf()).or_default() += 1;
+            }
+        }
+    }
+    let model_dir = mdirs.into_iter().max_by_key(|(_, n)| *n).map(|(d, _)| d);
+    let def = LibPaths::new(lib_path, lib_name);
+    if nick == lib_name && fp_dir == def.fp_dir && model_dir.as_ref().map_or(true, |m| *m == def.model_dir) {
+        return None;
+    }
+    Some(FpLayout { nick, fp_dir, model_dir, symbols })
 }
 
 /// Resolve the footprint's 3D model path and record which of STEP / WRL exist.

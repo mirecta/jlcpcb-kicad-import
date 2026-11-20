@@ -74,7 +74,7 @@ This creates a portable AppImage with all dependencies bundled.
    - Drag the 3D viewer to orbit; **middle-drag** to pan; scroll to zoom.
    - Adjust **3D Model Offset / Rotation / Scale** to fine-tune how the model sits on the footprint. Enable **Unified scale** to resize uniformly.
    - Load a **custom STEP** or **custom STL** if no 3D model is available.
-4. **Configure library path** — click **Settings** and either **Open existing library…** (pick its `.kicad_sym`) or **Browse folder…**. The folder and library name are detected automatically — picking a `.pretty`/`.3dshapes` folder by mistake is corrected, existing libraries in the folder are listed for one-click selection, and a warning is shown if the name would create a new library.
+4. **Configure library path** — click **Settings** and either **Open existing library…** (pick its `.kicad_sym`) or **Browse folder…**. The folder and library name are detected automatically — picking a `.pretty`/`.3dshapes` folder by mistake is corrected, existing libraries in the folder are listed for one-click selection, and a warning is shown if the name would create a new library. The footprint library can have a different name and folder than the symbol library (and its own 3D model folder) — by default both use the same name. When an existing symbol library already references another footprint library (via KiCad's `fp-lib-table`), that layout is detected and used automatically.
 5. **Browse your library** — the **📚 Library** tab in the left panel lists every component already in the configured library, with footprint/3D status, a filter box, broken footprint links and unused footprints highlighted. It reloads automatically when the files change; click a row to load the part from JLCPCB for preview or re-import. When opened from the Library tab, the 3D viewer shows the library's own model with the transform stored in the footprint — adjust offset / rotation / scale and click **💾 Save 3D transform to library** to write it back (only the `(model …)` block is changed; legacy `(at …)` in inches is converted to `(offset …)` in mm).
 6. **Import** — tick Symbol, Footprint, and/or 3D Model, then click **Import**.
 
@@ -93,7 +93,7 @@ jlcpcb-kicad --mcp                 # or: ./jlcpcb-kicad-*.AppImage --mcp
 claude mcp add jlcpcb-kicad -- /path/to/jlcpcb-kicad --mcp   # register in Claude Code
 ```
 
-It uses the same settings file as the GUI (library folder / name), and every tool accepts `lib_path` + `lib_name` to override them.
+It uses the same settings file as the GUI (library folder / name, footprint library, 3D folder), and every tool accepts `lib_path` + `lib_name` (plus optional `fp_lib_name`, `fp_dir`, `model_dir`) to override them.
 
 | Tool | What it does |
 |------|--------------|
@@ -113,6 +113,7 @@ It uses the same settings file as the GUI (library folder / name), and every too
 | File | Location |
 |------|----------|
 | Symbol | `<lib_path>/<lib_name>.kicad_sym` |
+| *(default layout below — footprint library name/folder and 3D folder are configurable)* | |
 | Footprint | `<lib_path>/<lib_name>.pretty/<package>.kicad_mod` |
 | 3D model (STEP) | `<lib_path>/<lib_name>.3dshapes/<package>.step` |
 | 3D model (WRL) | `<lib_path>/<lib_name>.3dshapes/<package>.wrl` |

@@ -60,29 +60,27 @@ pub struct ImportOptions {
     pub transform: ModelTransform,
 }
 
-/// Write symbol / footprint / 3D model of `comp` into `<lib_path>/<lib_name>.*`.
+/// Write symbol / footprint / 3D model of `comp` into the library.
 pub fn import_component(
-    lib_path: &str,
-    lib_name: &str,
+    paths: &LibPaths,
     comp: &Component,
     wrl: Option<&[u8]>,
     step: Option<&[u8]>,
     o: &ImportOptions,
 ) -> Result<()> {
-    let paths = LibPaths::new(lib_path, lib_name);
     // STEP preferred over WRL
     let model_ext = if step.is_some() { "step" } else if wrl.is_some() { "wrl" } else { "step" };
     paths.ensure_dirs()?;
     if o.symbol {
-        export::write_symbol(&paths, comp, lib_name, o.hide_pin_numbers, o.hide_pin_names)?;
+        export::write_symbol(paths, comp, o.hide_pin_numbers, o.hide_pin_names)?;
     }
     if o.footprint {
         let t = &o.transform;
-        export::write_footprint(&paths, comp, lib_name, t.offset, t.rotation, t.scale, model_ext)?;
+        export::write_footprint(paths, comp, t.offset, t.rotation, t.scale, model_ext)?;
     }
     if o.model_3d {
-        if let Some(s) = step { export::write_step_model(&paths, comp, s)?; }
-        if let Some(w) = wrl { export::write_wrl_model(&paths, comp, w)?; }
+        if let Some(s) = step { export::write_step_model(paths, comp, s)?; }
+        if let Some(w) = wrl { export::write_wrl_model(paths, comp, w)?; }
     }
     Ok(())
 }
@@ -100,7 +98,6 @@ pub struct RefreshOptions {
 /// `written_fps` avoids rewriting a footprint shared by several components.
 pub fn refresh_component(
     paths: &LibPaths,
-    lib_name: &str,
     comp: &Component,
     o: &RefreshOptions,
     hide_pin_numbers: bool,
@@ -109,7 +106,7 @@ pub fn refresh_component(
     written_fps: &mut HashSet<PathBuf>,
 ) -> Result<()> {
     if o.symbols {
-        *sym_text = update_component_in_lib(sym_text, comp, lib_name, &paths.fp_dir, hide_pin_numbers, hide_pin_names);
+        *sym_text = update_component_in_lib(sym_text, comp, paths, hide_pin_numbers, hide_pin_names);
     }
     if o.footprints {
         // Locate the existing file by LCSC id — package_name() may change between API calls
@@ -125,7 +122,7 @@ pub fn refresh_component(
         let stem = fp_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
         let model_ext = if paths.model_dir.join(format!("{stem}.wrl")).exists() { "wrl" } else { "step" };
         if !written_fps.contains(&fp_path) {
-            let model_path = format!("${{{}_3D}}/{}.{}", lib_name.to_uppercase().replace('-', "_"), stem, model_ext);
+            let model_path = paths.model_ref(&stem, model_ext);
             let content = export::build_footprint_content(comp, &stem, &model_path, t.offset, t.rotation, t.scale);
             std::fs::write(&fp_path, content)?;
             written_fps.insert(fp_path);
@@ -145,16 +142,15 @@ pub fn refresh_component(
 pub fn update_component_in_lib(
     content: &str,
     comp: &Component,
-    lib_name: &str,
-    fp_dir: &std::path::Path,
+    paths: &LibPaths,
     hide_pin_numbers: bool,
     hide_pin_names: bool,
 ) -> String {
     let name = export::sanitize_name(&comp.value);
-    let fp_name = export::find_fp_by_lcsc(fp_dir, &comp.lcsc_id)
+    let fp_name = export::find_fp_by_lcsc(&paths.fp_dir, &comp.lcsc_id)
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_else(|| export::package_name(comp));
-    let new_sym = export::build_symbol(comp, lib_name, &fp_name, hide_pin_numbers, hide_pin_names);
+    let new_sym = export::build_symbol(comp, &paths.fp_nick, &fp_name, hide_pin_numbers, hide_pin_names);
     export::replace_symbol_in_lib(content, &name, &new_sym)
 }
 

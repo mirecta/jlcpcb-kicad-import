@@ -231,6 +231,8 @@ struct AppState {
     // Datasheet download (own channel so it doesn't block other loading)
     ds_rx: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
 
+    // Cached footprint-layout detection for the settings dialog: (path|name, result)
+    layout_detect: Option<(String, Option<library::FpLayout>)>,
     // Cached scan of settings.lib_path for the settings dialog
     lib_scan: Option<(String, settings::LibScan)>,
 
@@ -279,12 +281,14 @@ impl App {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
         let mut state = AppState::default();
-        state.settings = settings::load();
+        state.settings = settings::load_effective();
         state.search_history = settings::load_history();
 
         // Override lib_path from command line if provided
         if let Some(path) = lib_path_override {
             state.settings.lib_path = path;
+            state.settings.apply_layout(None);
+            state.settings.fill_detected_layout();
         }
 
         state.model_scale = [1.0, 1.0, 1.0];
@@ -384,21 +388,23 @@ impl App {
     }
 
     fn show_library_tab(&mut self, ui: &mut egui::Ui) {
-        let lib_path = self.state.settings.lib_path.clone();
-        let lib_name = self.state.settings.lib_name.clone();
+        let paths = self.state.settings.paths();
+        let lib_name = paths.sym_name.clone();
 
         // Reload automatically whenever the library files change on disk
-        let key = library::cache_key(&lib_path, &lib_name);
+        let key = library::cache_key(&paths);
         let mut force = false;
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(format!("{lib_path}/{lib_name}")).small().weak());
+            ui.label(egui::RichText::new(paths.sym_file.display().to_string()).small().weak())
+                .on_hover_text(format!("Footprints: {} ({})\n3D models: {}",
+                    paths.fp_nick, paths.fp_dir.display(), paths.model_dir.display()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 force = ui.small_button("⟳ Reload").clicked();
             });
         });
         if force || key != self.state.lib_key || self.state.lib_contents.is_none() {
             self.state.lib_key = key;
-            self.state.lib_contents = Some(library::load(&lib_path, &lib_name).map_err(|e| e.to_string()));
+            self.state.lib_contents = Some(library::load(&paths).map_err(|e| e.to_string()));
         }
 
         let contents = match self.state.lib_contents.as_ref().unwrap() {
@@ -555,8 +561,7 @@ impl App {
     }
 
     fn do_refresh_library_ids(&mut self, opts: RefreshOptions, ids: Vec<String>) {
-        let lib_path          = self.state.settings.lib_path.clone();
-        let lib_name          = self.state.settings.lib_name.clone();
+        let paths             = self.state.settings.paths();
         let hide_pin_numbers  = self.state.hide_pin_numbers;
         let hide_pin_names    = self.state.hide_pin_names;
         self.state.status = "Starting library refresh...".to_string();
@@ -564,7 +569,6 @@ impl App {
         self.spawn(move |tx| {
             use std::fs;
 
-            let paths = export::LibPaths::new(&lib_path, &lib_name);
 
             let sym_content = match fs::read_to_string(&paths.sym_file) {
                 Ok(c) => c,
@@ -626,7 +630,7 @@ impl App {
                 };
 
                 if let Err(e) = ops::refresh_component(
-                    &paths, &lib_name, &comp, &opts,
+                    &paths, &comp, &opts,
                     hide_pin_numbers, hide_pin_names,
                     &mut updated_sym, &mut written_fps,
                 ) {
@@ -818,10 +822,13 @@ impl eframe::App for App {
             egui::Window::new("Settings")
                 .collapsible(false)
                 .resizable(false)
+                .min_width(620.0)
                 .show(ctx, |ui| {
+                    // Set when the user picks/clicks a library — adopt its footprint layout
+                    let mut picked = false;
                     ui.label("Library folder:");
                     ui.add(egui::TextEdit::singleline(&mut self.state.settings.lib_path)
-                        .desired_width(420.0));
+                        .desired_width(600.0));
                     ui.horizontal(|ui| {
                         if ui.button("📁 Browse folder…")
                             .on_hover_text("Pick the folder that contains <name>.kicad_sym / <name>.pretty.\nPicking a .pretty or .3dshapes folder (or anything inside it) also works.")
@@ -834,6 +841,7 @@ impl eframe::App for App {
                                 let (dir, name) = settings::resolve_pick(&path);
                                 self.state.settings.lib_path = dir.to_string_lossy().to_string();
                                 if let Some(n) = name { self.state.settings.lib_name = n; }
+                                picked = true;
                             }
                         }
                         if ui.button("📄 Open existing library…")
@@ -848,6 +856,7 @@ impl eframe::App for App {
                                 let (dir, name) = settings::resolve_pick(&path);
                                 self.state.settings.lib_path = dir.to_string_lossy().to_string();
                                 if let Some(n) = name { self.state.settings.lib_name = n; }
+                                picked = true;
                             }
                         }
                     });
@@ -869,6 +878,7 @@ impl eframe::App for App {
                         if ui.button(format!("Use {}  (name: {})", dir, name)).clicked() {
                             self.state.settings.lib_path = dir.clone();
                             self.state.settings.lib_name = name.clone();
+                            picked = true;
                         }
                     } else if !scan.exists {
                         ui.colored_label(warn, "⚠ Folder does not exist — it will be created on import.");
@@ -882,6 +892,7 @@ impl eframe::App for App {
                                     if ui.button(format!("Use {}  (name: {})", dir, n)).clicked() {
                                         self.state.settings.lib_path = dir.clone();
                                         self.state.settings.lib_name = n.clone();
+                                        picked = true;
                                     }
                                 }
                             }
@@ -902,6 +913,7 @@ impl eframe::App for App {
                             let selected = li.name == self.state.settings.lib_name;
                             if ui.selectable_label(selected, format!("📚 {}   ({})", li.name, parts)).clicked() {
                                 self.state.settings.lib_name = li.name.clone();
+                                picked = true;
                             }
                         }
                     }
@@ -924,17 +936,98 @@ impl eframe::App for App {
                     ui.weak(format!("→ {}",
                         std::path::Path::new(self.state.settings.lib_path.trim())
                             .join(format!("{}.kicad_sym", name)).display()));
+
+                    // ── Footprint library + 3D models ──
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.label(egui::RichText::new("Footprints and 3D models").strong());
+                    let dkey = format!("{}|{}", self.state.settings.lib_path.trim(), name);
+                    if self.state.layout_detect.as_ref().map(|(k, _)| k != &dkey).unwrap_or(true) {
+                        // Library changed while the dialog is open → re-detect its footprint layout
+                        if self.state.layout_detect.is_some() { picked = true; }
+                        let d = library::detect_layout(self.state.settings.lib_path.trim(), &name);
+                        self.state.layout_detect = Some((dkey, d));
+                    }
+                    let detected = self.state.layout_detect.as_ref().and_then(|(_, d)| d.clone());
+                    if picked {
+                        self.state.settings.apply_layout(detected.as_ref());
+                    }
+                    let mut same = self.state.settings.fp_is_default();
+                    if ui.checkbox(&mut same, "Same name and folder as the symbol library").changed() {
+                        if same {
+                            self.state.settings.apply_layout(None);
+                        } else if detected.is_some() {
+                            self.state.settings.apply_layout(detected.as_ref());
+                        } else {
+                            self.state.settings.fp_lib_name = name.clone();
+                        }
+                    }
+                    if let Some(d) = &detected {
+                        let cur = self.state.settings.paths();
+                        if cur.fp_nick != d.nick || cur.fp_dir != d.fp_dir {
+                            ui.colored_label(warn, format!(
+                                "⚠ Symbols in this library ({}) use footprint library \"{}\" in {}",
+                                d.symbols, d.nick, d.fp_dir.display()));
+                            if ui.button(format!("Use \"{}\"", d.nick)).clicked() {
+                                self.state.settings.apply_layout(Some(d));
+                            }
+                        }
+                    }
+                    if !self.state.settings.fp_is_default() || !same {
+                        egui::Grid::new("fp_layout").num_columns(3).spacing([6.0, 4.0]).show(ui, |ui| {
+                            ui.label("Footprint library name:");
+                            ui.add_sized([420.0, 20.0], egui::TextEdit::singleline(&mut self.state.settings.fp_lib_name)
+                                .hint_text(name.as_str()));
+                            ui.end_row();
+                            ui.label("Footprint folder:");
+                            ui.add_sized([420.0, 20.0], egui::TextEdit::singleline(&mut self.state.settings.fp_dir)
+                                .hint_text("<library folder>/<name>.pretty"));
+                            if ui.button("📁").clicked() {
+                                if let Some(p) = rfd::FileDialog::new().set_directory(self.state.settings.lib_path.trim()).pick_folder() {
+                                    self.state.settings.fp_dir = p.to_string_lossy().to_string();
+                                    if self.state.settings.fp_lib_name.trim().is_empty() {
+                                        let stem = p.file_name().unwrap_or_default().to_string_lossy();
+                                        self.state.settings.fp_lib_name = stem.strip_suffix(".pretty").unwrap_or(&stem).to_string();
+                                    }
+                                }
+                            }
+                            ui.end_row();
+                            ui.label("3D model folder:");
+                            ui.add_sized([420.0, 20.0], egui::TextEdit::singleline(&mut self.state.settings.model_dir)
+                                .hint_text("<library folder>/<name>.3dshapes"));
+                            if ui.button("📁").clicked() {
+                                let start = if self.state.settings.fp_dir.trim().is_empty() { self.state.settings.lib_path.clone() } else { self.state.settings.fp_dir.clone() };
+                                if let Some(p) = rfd::FileDialog::new().set_directory(start.trim()).pick_folder() {
+                                    self.state.settings.model_dir = p.to_string_lossy().to_string();
+                                }
+                            }
+                            ui.end_row();
+                        });
+                    }
+                    {
+                        let p = self.state.settings.paths();
+                        ui.weak(format!("→ {}  (symbols reference \"{}:…\")", p.fp_dir.display(), p.fp_nick));
+                        ui.weak(format!("→ {}  (model path in footprint: {})", p.model_dir.display(), p.model_ref("<name>", "step")));
+                        if let Some(v) = p.model_var() {
+                            ui.weak(format!("   KiCad path variable {v} must point to the 3D folder"));
+                        }
+                    }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             let st = &mut self.state.settings;
                             st.lib_path = st.lib_path.trim().to_string();
                             st.lib_name = st.lib_name.trim().to_string();
+                            st.fp_lib_name = st.fp_lib_name.trim().to_string();
+                            st.fp_dir = st.fp_dir.trim().to_string();
+                            st.model_dir = st.model_dir.trim().to_string();
                             let _ = settings::save(&self.state.settings);
                             self.state.show_settings = false;
+                            self.state.layout_detect = None;
                         }
                         if ui.button("Cancel").clicked() {
                             self.state.show_settings = false;
+                            self.state.layout_detect = None;
                         }
                     });
                 });
@@ -1130,8 +1223,7 @@ impl eframe::App for App {
                     }
                     if ui.add_enabled(!self.state.loading, egui::Button::new("🔄 Refresh Library")).clicked() {
                         // Load component list from symbol library
-                        let sym_file = std::path::Path::new(&self.state.settings.lib_path)
-                            .join(format!("{}.kicad_sym", self.state.settings.lib_name));
+                        let sym_file = self.state.settings.paths().sym_file;
                         if let Ok(content) = std::fs::read_to_string(&sym_file) {
                             self.state.refresh_component_list = extract_lcsc_ids_with_names(&content)
                                 .into_iter()
@@ -1735,12 +1827,20 @@ impl eframe::App for App {
 
                 // Import
                 ui.label(egui::RichText::new("Import to KiCad Library").strong());
-                ui.horizontal(|ui| {
-                    ui.label("Path:");
-                    ui.monospace(&self.state.settings.lib_path);
-                    ui.label("  Name:");
-                    ui.monospace(&self.state.settings.lib_name);
-                });
+                {
+                    let p = self.state.settings.paths();
+                    egui::Grid::new("import_targets").num_columns(2).spacing([8.0, 2.0]).show(ui, |ui| {
+                        ui.label("Symbol:");
+                        ui.monospace(p.sym_file.display().to_string());
+                        ui.end_row();
+                        ui.label("Footprint:");
+                        ui.monospace(format!("{}  ({}:…)", p.fp_dir.display(), p.fp_nick));
+                        ui.end_row();
+                        ui.label("3D model:");
+                        ui.monospace(p.model_dir.display().to_string());
+                        ui.end_row();
+                    });
+                }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.state.import_symbol, "Symbol");
@@ -1769,12 +1869,12 @@ impl eframe::App for App {
                         },
                     };
                     let result = ops::import_component(
-                        &self.state.settings.lib_path, &self.state.settings.lib_name, &comp,
+                        &self.state.settings.paths(), &comp,
                         self.state.wrl_bytes.as_deref(), self.state.step_bytes.as_deref(), &opts);
                     self.state.status = match result {
-                        Ok(()) => format!("Imported {} ({}) → {}/{}",
+                        Ok(()) => format!("Imported {} ({}) → {} / {}",
                             comp.value, comp.lcsc_id,
-                            self.state.settings.lib_path, self.state.settings.lib_name),
+                            self.state.settings.lib_name, self.state.settings.paths().fp_nick),
                         Err(e) => format!("Import error: {e}"),
                     };
                 }

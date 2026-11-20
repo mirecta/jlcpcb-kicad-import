@@ -2,20 +2,56 @@ use crate::api::{Component, FpGraphic, Pin, SymGraphic};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+/// Where a library's parts live. Symbol and footprint libraries may have
+/// different names and folders; by default both use the symbol library name:
+/// `<lib_path>/<name>.kicad_sym`, `<lib_path>/<name>.pretty`, `<lib_path>/<name>.3dshapes`.
+#[derive(Debug, Clone)]
 pub struct LibPaths {
+    pub lib_path: PathBuf,
+    pub sym_name: String,
     pub sym_file: PathBuf,
+    /// Footprint library nickname (used in the symbols' Footprint field).
+    pub fp_nick: String,
     pub fp_dir: PathBuf,
     pub model_dir: PathBuf,
 }
 
 impl LibPaths {
     pub fn new(lib_path: &str, lib_name: &str) -> Self {
-        let base = Path::new(lib_path);
+        Self::with_footprints(lib_path, lib_name, "", "", "")
+    }
+
+    /// Empty `fp_name` / `fp_dir` / `model_dir` fall back to the defaults.
+    pub fn with_footprints(lib_path: &str, lib_name: &str, fp_name: &str, fp_dir: &str, model_dir: &str) -> Self {
+        let base = Path::new(lib_path.trim());
+        let lib_name = lib_name.trim();
+        let fp_nick = if fp_name.trim().is_empty() { lib_name } else { fp_name.trim() };
         Self {
+            lib_path: base.to_path_buf(),
+            sym_name: lib_name.to_string(),
             sym_file: base.join(format!("{}.kicad_sym", lib_name)),
-            fp_dir: base.join(format!("{}.pretty", lib_name)),
-            model_dir: base.join(format!("{}.3dshapes", lib_name)),
+            fp_nick: fp_nick.to_string(),
+            fp_dir: if fp_dir.trim().is_empty() { base.join(format!("{}.pretty", fp_nick)) } else { PathBuf::from(fp_dir.trim()) },
+            model_dir: if model_dir.trim().is_empty() { base.join(format!("{}.3dshapes", fp_nick)) } else { PathBuf::from(model_dir.trim()) },
         }
+    }
+
+    /// Path written into a footprint's (model …): relative to the footprint
+    /// library when the 3D folder lies inside it (works from any project),
+    /// otherwise via the `${<FP_NICK>_3D}` path variable.
+    pub fn model_ref(&self, stem: &str, ext: &str) -> String {
+        if let Ok(rel) = self.model_dir.strip_prefix(&self.fp_dir) {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if rel.is_empty() { return format!("{stem}.{ext}"); }
+            return format!("{rel}/{stem}.{ext}");
+        }
+        format!("${{{}_3D}}/{}.{}", self.fp_nick.to_uppercase().replace('-', "_"), stem, ext)
+    }
+
+    /// Name of the path variable to define in KiCad (None when relative paths are used).
+    pub fn model_var(&self) -> Option<String> {
+        (!self.model_dir.starts_with(&self.fp_dir))
+            .then(|| format!("{}_3D", self.fp_nick.to_uppercase().replace('-', "_")))
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
@@ -28,7 +64,6 @@ impl LibPaths {
 pub fn write_symbol(
     paths: &LibPaths,
     component: &Component,
-    lib_name: &str,
     hide_pin_numbers: bool,
     hide_pin_names: bool,
 ) -> Result<()> {
@@ -36,7 +71,7 @@ pub fn write_symbol(
     let fp_name = find_fp_by_lcsc(&paths.fp_dir, &component.lcsc_id)
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_else(|| package_name(component));
-    let sym = build_symbol(component, lib_name, &fp_name, hide_pin_numbers, hide_pin_names);
+    let sym = build_symbol(component, &paths.fp_nick, &fp_name, hide_pin_numbers, hide_pin_names);
     let name = sanitize_name(&component.value);
 
     if paths.sym_file.exists() {
@@ -93,7 +128,6 @@ pub fn find_fp_by_lcsc(fp_dir: &Path, lcsc_id: &str) -> Option<PathBuf> {
 pub fn write_footprint(
     paths: &LibPaths,
     component: &Component,
-    lib_name: &str,
     model_offset: [f32; 3],
     model_rotation: [f32; 3],
     model_scale: [f32; 3],
@@ -105,12 +139,7 @@ pub fn write_footprint(
         paths.fp_dir.join(format!("{}.kicad_mod", package_name(component)))
     });
     let name = fp_file.file_stem().unwrap_or_default().to_string_lossy();
-    let model_path = format!(
-        "${{{lib_name}_3D}}/{name}.{ext}",
-        lib_name = lib_name.to_uppercase().replace('-', "_"),
-        name = name,
-        ext  = model_ext,
-    );
+    let model_path = paths.model_ref(&name, model_ext);
     let content = build_footprint(component, &name, &model_path, model_offset, model_rotation, model_scale);
     std::fs::write(&fp_file, content)?;
     Ok(())
@@ -214,9 +243,9 @@ pub fn label_positions(pins: &[Pin]) -> ([f32; 2], [f32; 2]) {
     ([0.0, max_y + 2.54], [0.0, min_y - 2.54])
 }
 
-pub fn build_symbol(c: &Component, lib_name: &str, fp_name: &str, hide_pin_numbers: bool, hide_pin_names: bool) -> String {
+pub fn build_symbol(c: &Component, fp_lib: &str, fp_name: &str, hide_pin_numbers: bool, hide_pin_names: bool) -> String {
     let name = sanitize_name(&c.value);
-    let footprint_ref = format!("{}:{}", lib_name, fp_name);
+    let footprint_ref = format!("{}:{}", fp_lib, fp_name);
 
     let (ref_pos, val_pos) = label_positions(&c.pins);
 
@@ -637,4 +666,32 @@ pub fn sanitize_name(name: &str) -> String {
 
 fn esc(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod lib_paths_tests {
+    use super::*;
+
+    #[test]
+    fn default_layout_uses_one_name() {
+        let p = LibPaths::new("/l", "mylib");
+        assert_eq!(p.fp_nick, "mylib");
+        assert_eq!(p.fp_dir, PathBuf::from("/l/mylib.pretty"));
+        assert_eq!(p.model_dir, PathBuf::from("/l/mylib.3dshapes"));
+        assert_eq!(p.model_ref("SOT23", "step"), "${MYLIB_3D}/SOT23.step");
+        assert_eq!(p.model_var().as_deref(), Some("MYLIB_3D"));
+    }
+
+    #[test]
+    fn separate_footprint_library() {
+        let p = LibPaths::with_footprints("/l/sym", "Syms", "Fps", "/l/Fps", "/l/Fps/models");
+        assert_eq!(p.sym_file, PathBuf::from("/l/sym/Syms.kicad_sym"));
+        assert_eq!(p.fp_nick, "Fps");
+        assert_eq!(p.model_ref("SOT23", "step"), "models/SOT23.step");
+        assert_eq!(p.model_var(), None);
+        // only the name differs → folders follow the footprint name
+        let p = LibPaths::with_footprints("/l", "Syms", "Fps", "", "");
+        assert_eq!(p.fp_dir, PathBuf::from("/l/Fps.pretty"));
+        assert_eq!(p.model_ref("X", "wrl"), "${FPS_3D}/X.wrl");
+    }
 }
