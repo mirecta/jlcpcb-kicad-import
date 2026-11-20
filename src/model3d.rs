@@ -43,6 +43,7 @@ void main() {
 
 // ── Pad descriptor (world XY coords in mm, Z is PCB surface = 0) ──────────────
 
+#[derive(Clone)]
 pub struct PadInfo {
     pub cx: f32,  // centre X in mm
     pub cy: f32,  // centre Y in mm (Z-up, XY plane)
@@ -58,6 +59,7 @@ pub struct PadInfo {
 
 // ── Footprint drawing (silkscreen / fab layer flat geometry) ──────────────────
 
+#[derive(Clone)]
 pub struct PcbDrawing {
     pub tris:  Vec<[f32; 2]>,  // (x_mm, y_mm) triangle verts in XY plane
     pub color: [f32; 3],
@@ -1357,4 +1359,184 @@ fn build_axes() -> Vec<f32> {
     v.extend_from_slice(&[0.0, 0.0, len]); v.extend_from_slice(&n); v.extend_from_slice(&[0.0, 0.0, 1.0]);
 
     v
+}
+
+// ── Offscreen software renderer (used by the MCP server) ──────────────────────
+
+/// Camera presets — identical to the 3D viewer's buttons in the app
+/// (Top/Front/Back/Left/Right/Bottom/Iso); "iso" is also the view after loading.
+pub fn view_angles(view: &str) -> Option<(f32, f32)> {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    Some(match view {
+        "top"    => (0.0, FRAC_PI_2 * 0.99),
+        "front"  => (0.0, 0.0),
+        "back"   => (PI, 0.0),
+        "left"   => (-FRAC_PI_2, 0.0),
+        "right"  => (FRAC_PI_2, 0.0),
+        "bottom" => (0.0, -FRAC_PI_2 * 0.99),
+        "iso"    => (0.5, 0.4),
+        _ => return None,
+    })
+}
+
+/// CPU re-implementation of `GlState::paint`: same geometry (PCB body, component,
+/// axes, semi-transparent PCB edges), same model matrix, camera (zoom 2.5, no pan),
+/// projection and lighting, so the image matches the app's 3D viewer.
+/// `model` is (bytes, is_wrl). Returns (rgba, has_model).
+pub fn render_offscreen(
+    model: Option<(&[u8], bool)>,
+    pads: &[PadInfo],
+    drawings: &[PcbDrawing],
+    offset: [f32; 3],
+    rotation: [f32; 3],
+    scale: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    ortho: bool,
+    width: u32,
+    height: u32,
+) -> (image::RgbaImage, bool) {
+    let mesh = model.and_then(|(b, is_wrl)| {
+        if is_wrl { parse_wrl(b, [0.0; 3]) } else { parse_step(b, [0.0; 3], false) }
+    });
+    let has_model = mesh.is_some();
+    // Without a model the viewer shows nothing; keep a sensible camera anyway
+    let (center, radius, xy_half, comp) = match &mesh {
+        Some(m) => (m.center, m.radius, m.xy_half, m.data.as_slice()),
+        None => (Vec3::ZERO, 5.0, 2.5, &[][..]),
+    };
+    let pcb = build_pcb_body(radius, xy_half, pads, drawings);
+    let edges = build_pcb_edges(radius, xy_half, pads);
+    let axes = build_axes();
+
+    // ── camera: copied from GlState::paint (zoom 2.5 = reset_view, cam_pan 0) ──
+    let zoom = 2.5_f32;
+    let comp_model = build_model_mat(offset, rotation, scale, center);
+    let orbit_target = Vec3::new(offset[0], offset[1], offset[2]) + center;
+    let dist = radius * zoom;
+    let eye = orbit_target + Vec3::new(
+        dist * pitch.cos() * yaw.sin(),
+        dist * pitch.cos() * yaw.cos(),
+        dist * pitch.sin(),
+    );
+    let aspect = width as f32 / height.max(1) as f32;
+    let view = Mat4::look_at_rh(eye, orbit_target, Vec3::Z);
+    let proj = if ortho {
+        let half_h = radius * zoom;
+        let half_w = half_h * aspect;
+        Mat4::orthographic_rh_gl(-half_w, half_w, -half_h, half_h, -dist * 100.0, dist * 100.0)
+    } else {
+        Mat4::perspective_rh_gl(0.7, aspect, dist * 0.001, dist * 200.0)
+    };
+    let vp = proj * view;
+
+    let (w, h) = (width as usize, height as usize);
+    let mut color = vec![[1.0f32, 1.0, 1.0]; w * h]; // clear_color white
+    let mut depth = vec![1.0f32; w * h];             // clear_depth 1.0, func LESS
+
+    // Fragment shader lighting
+    let l1 = Vec3::new(1.0, 2.0, 1.5).normalize();
+    let l2 = Vec3::new(-1.0, 1.5, -0.5).normalize();
+    let l3 = Vec3::new(0.0, -1.0, 0.5).normalize();
+    let shade = |n: Vec3, c: Vec3| -> Vec3 {
+        let n = n.normalize_or_zero();
+        let d = n.dot(l1).abs() + 0.45 * n.dot(l2).abs() + 0.20 * n.dot(l3).abs();
+        c * (0.45 + 0.55 * d)
+    };
+    // clip -> window coords (x, y down, depth 0..1)
+    let to_screen = |c: glam::Vec4| -> Option<Vec3> {
+        if c.w.abs() < 1e-9 { return None; }
+        let n = c.truncate() / c.w;
+        Some(Vec3::new((n.x + 1.0) * 0.5 * w as f32, (1.0 - n.y) * 0.5 * h as f32, (n.z + 1.0) * 0.5))
+    };
+
+    let draw_tris = |color: &mut Vec<[f32; 3]>, depth: &mut Vec<f32>, data: &[f32], model: Mat4, alpha: f32, write_depth: bool| {
+        let m3 = Mat3::from_mat4(model);
+        let nrm_m = if m3.determinant().abs() > 1e-6 { m3.inverse().transpose() } else { Mat3::IDENTITY };
+        let mvp = vp * model;
+        for tri in data.chunks_exact(27) {
+            let mut sp = [Vec3::ZERO; 3];
+            let mut ns = [Vec3::ZERO; 3];
+            let mut cs = [Vec3::ZERO; 3];
+            let mut ok = true;
+            for k in 0..3 {
+                let v = &tri[k * 9..k * 9 + 9];
+                let c = mvp * glam::Vec4::new(v[0], v[1], v[2], 1.0);
+                if !ortho && c.w <= 0.0 { ok = false; break; }
+                match to_screen(c) { Some(p) => sp[k] = p, None => { ok = false; break; } }
+                ns[k] = nrm_m * Vec3::new(v[3], v[4], v[5]);
+                cs[k] = Vec3::new(v[6], v[7], v[8]);
+            }
+            if !ok { continue; }
+            let area = (sp[1].x - sp[0].x) * (sp[2].y - sp[0].y) - (sp[2].x - sp[0].x) * (sp[1].y - sp[0].y);
+            if area.abs() < 1e-12 { continue; }
+            let minx = sp.iter().map(|p| p.x).fold(f32::MAX, f32::min).floor().max(0.0);
+            let maxx = sp.iter().map(|p| p.x).fold(f32::MIN, f32::max).ceil().min(w as f32 - 1.0);
+            let miny = sp.iter().map(|p| p.y).fold(f32::MAX, f32::min).floor().max(0.0);
+            let maxy = sp.iter().map(|p| p.y).fold(f32::MIN, f32::max).ceil().min(h as f32 - 1.0);
+            if maxx < minx || maxy < miny { continue; }
+            for y in miny as usize..=maxy as usize {
+                for x in minx as usize..=maxx as usize {
+                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let b0 = ((sp[1].x - px) * (sp[2].y - py) - (sp[2].x - px) * (sp[1].y - py)) / area;
+                    let b1 = ((sp[2].x - px) * (sp[0].y - py) - (sp[0].x - px) * (sp[2].y - py)) / area;
+                    let b2 = 1.0 - b0 - b1;
+                    if b0 < 0.0 || b1 < 0.0 || b2 < 0.0 { continue; }
+                    let z = b0 * sp[0].z + b1 * sp[1].z + b2 * sp[2].z;
+                    let i = y * w + x;
+                    if !(z < depth[i]) || !(0.0..=1.0).contains(&z) { continue; }
+                    // smooth (per-fragment) normal + colour, like the GL varyings
+                    let n = ns[0] * b0 + ns[1] * b1 + ns[2] * b2;
+                    let c = shade(n, cs[0] * b0 + cs[1] * b1 + cs[2] * b2);
+                    let dst = Vec3::from(color[i]);
+                    let out = c * alpha + dst * (1.0 - alpha);
+                    color[i] = out.to_array();
+                    if write_depth { depth[i] = z; }
+                }
+            }
+        }
+    };
+
+    // Same order as paint(): PCB body, component, axes, then transparent edges
+    draw_tris(&mut color, &mut depth, &pcb, Mat4::IDENTITY, 1.0, true);
+    draw_tris(&mut color, &mut depth, comp, comp_model, 1.0, true);
+
+    // Axes: GL_LINES, line_width 3, lit with the dummy normal
+    for seg in axes.chunks_exact(18) {
+        let a = Vec3::new(seg[0], seg[1], seg[2]);
+        let b = Vec3::new(seg[9], seg[10], seg[11]);
+        let col = shade(Vec3::new(seg[3], seg[4], seg[5]), Vec3::new(seg[6], seg[7], seg[8]));
+        let (Some(pa), Some(pb)) = (to_screen(vp * a.extend(1.0)), to_screen(vp * b.extend(1.0))) else { continue };
+        let steps = ((pb.x - pa.x).abs().max((pb.y - pa.y).abs()).ceil() as usize).clamp(1, 20000);
+        for k in 0..=steps {
+            let t = k as f32 / steps as f32;
+            let p = pa + (pb - pa) * t;
+            for (dx, dy) in [(0i32, 0i32), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (x, y) = (p.x as i32 + dx, p.y as i32 + dy);
+                if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 { continue; }
+                let i = y as usize * w + x as usize;
+                // Coplanar with the board top (z = 0): GL's LESS test lets the board win
+                if p.z < depth[i] - 1e-5 && (0.0..=1.0).contains(&p.z) {
+                    depth[i] = p.z;
+                    color[i] = col.to_array();
+                }
+            }
+        }
+    }
+
+    if !edges.is_empty() {
+        draw_tris(&mut color, &mut depth, &edges, Mat4::IDENTITY, 0.80, false);
+    }
+
+    let mut img = image::RgbaImage::new(width, height);
+    for (i, c) in color.iter().enumerate() {
+        let px = [
+            (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (c[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (c[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+            255,
+        ];
+        img.put_pixel((i % w) as u32, (i / w) as u32, image::Rgba(px));
+    }
+    (img, has_model)
 }

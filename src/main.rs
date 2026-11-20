@@ -1,5 +1,8 @@
 mod api;
 mod export;
+mod library;
+mod mcp;
+mod ops;
 mod model3d;
 mod preview;
 mod settings;
@@ -54,8 +57,10 @@ fn setup_fonts(ctx: &egui::Context) {
         ]
     };
 
+    let mut fonts = egui::FontDefinitions::default();
+    let mut changed = false;
+
     if let Some(data) = paths.iter().find_map(|p| std::fs::read(p).ok()) {
-        let mut fonts = egui::FontDefinitions::default();
         fonts.font_data.insert(
             "system".to_owned(),
             egui::FontData::from_owned(data).into(),
@@ -71,8 +76,64 @@ fn setup_fonts(ctx: &egui::Context) {
             .get_mut(&egui::FontFamily::Monospace)
             .unwrap()
             .push("system".to_owned());
+        changed = true;
+    }
+
+    // CJK fallback: JLCPCB descriptions/attributes often contain Chinese text and
+    // the ideographic comma "、" (e.g. "B3、B5、B7"), which DejaVu etc. lack.
+    if let Some((data, index)) = find_cjk_font() {
+        let mut fd = egui::FontData::from_owned(data);
+        fd.index = index;
+        fonts.font_data.insert("cjk".to_owned(), fd.into());
+        for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.get_mut(&fam).unwrap().push("cjk".to_owned());
+        }
+        changed = true;
+    }
+
+    if changed {
         ctx.set_fonts(fonts);
     }
+}
+
+/// Locate a font with Simplified Chinese glyphs: (file bytes, face index in .ttc).
+fn find_cjk_font() -> Option<(Vec<u8>, u32)> {
+    // Ask fontconfig first (works across distros and from inside the AppImage)
+    if cfg!(target_os = "linux") {
+        if let Ok(out) = std::process::Command::new("fc-match")
+            .args(["-f", "%{file}:%{index}", "sans-serif:lang=zh-cn"])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout).to_string();
+            if let Some((file, idx)) = s.trim().rsplit_once(':') {
+                let lang_ok = std::process::Command::new("fc-list")
+                    .args([":lang=zh-cn", "file"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).contains(file))
+                    .unwrap_or(false);
+                if lang_ok {
+                    if let Ok(data) = std::fs::read(file) {
+                        return Some((data, idx.parse().unwrap_or(0)));
+                    }
+                }
+            }
+        }
+    }
+    let candidates: &[(&str, u32)] = if cfg!(target_os = "windows") {
+        &[("C:\\Windows\\Fonts\\msyh.ttc", 0), ("C:\\Windows\\Fonts\\simsun.ttc", 0)]
+    } else if cfg!(target_os = "macos") {
+        &[("/System/Library/Fonts/PingFang.ttc", 0), ("/System/Library/Fonts/STHeiti Light.ttc", 0)]
+    } else {
+        &[
+            ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2),       // Debian/Ubuntu (SC)
+            ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 2),            // Arch
+            ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 2),     // Fedora
+            ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0),
+            ("/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc", 0),
+            ("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf", 0),
+        ]
+    };
+    candidates.iter().find_map(|(p, i)| std::fs::read(p).ok().map(|d| (d, *i)))
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -98,13 +159,23 @@ impl PanZoom {
     fn reset(&mut self) { *self = Self::default(); }
 }
 
-#[derive(Clone, Copy)]
-struct RefreshOptions {
-    symbols:          bool,
-    footprints:       bool,
-    models_3d:        bool,
-    keep_3d_settings: bool,
+/// Component opened from the Library tab — 3D transform edits can be saved back.
+#[derive(Clone)]
+struct LibEditTarget {
+    lcsc: String,
+    fp_file: std::path::PathBuf,
+    model_file: Option<std::path::PathBuf>,
+    saved: library::ModelTransform,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum LeftTab {
+    #[default]
+    Search,
+    Library,
+}
+
+use ops::RefreshOptions;
 
 enum BgMsg {
     SearchDone(Vec<SearchResult>),
@@ -149,6 +220,19 @@ struct AppState {
     // Settings
     settings: Settings,
     show_settings: bool,
+    // Left panel tab + library browser
+    left_tab: LeftTab,
+    lib_key: String,
+    lib_contents: Option<Result<library::LibContents, String>>,
+    lib_filter: String,
+    lib_selected: Option<String>,
+    lib_edit: Option<LibEditTarget>,
+
+    // Datasheet download (own channel so it doesn't block other loading)
+    ds_rx: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+
+    // Cached scan of settings.lib_path for the settings dialog
+    lib_scan: Option<(String, settings::LibScan)>,
 
     // Import options
     import_symbol: bool,
@@ -256,30 +340,218 @@ impl App {
         self.state.status = format!("Loading {}…", lcsc_id);
         let ctx = ctx.clone();
         self.spawn(move |tx| {
-            let mut comp = match api::fetch_component(&lcsc_id) {
+            let (comp, warn) = match ops::fetch_component(&lcsc_id) {
                 Err(e) => { let _ = tx.send(BgMsg::DetailErr(e.to_string())); return; }
                 Ok(c) => c,
-            };
-            // Retry once if data is incomplete (rate-limited response)
-            if comp.pins.is_empty() || comp.pads.is_empty() {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                if let Ok(retry) = api::fetch_component(&lcsc_id) {
-                    if !retry.pins.is_empty() || !retry.pads.is_empty() {
-                        comp = retry;
-                    }
-                }
-            }
-            let warn: Option<String> = match (comp.pins.is_empty(), comp.pads.is_empty()) {
-                (true, true)  => Some("⚠ No pin data and no footprint data from API".into()),
-                (true, false) => Some("⚠ No pin data from API".into()),
-                (false, true) => Some("⚠ No footprint data from API".into()),
-                _             => None,
             };
             let wrl = comp.wrl_url.as_deref().and_then(|url| api::download_wrl(url));
             let step = comp.step_url.as_deref().and_then(|url| api::download_bytes(url).ok());
             let _ = tx.send(BgMsg::DetailDone(comp, wrl, step, warn));
             ctx.request_repaint();
         });
+    }
+
+    /// Ask where to save the datasheet, then download it in the background.
+    fn save_datasheet(&mut self, comp: &Component) {
+        let default_name = format!("{}_{}.pdf", export::sanitize_name(&comp.value), comp.lcsc_id);
+        let mut dlg = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter("PDF", &["pdf"]);
+        let dir = std::path::Path::new(&self.state.settings.datasheet_dir);
+        if dir.is_dir() {
+            dlg = dlg.set_directory(dir);
+        } else if let Some(d) = dirs::download_dir() {
+            dlg = dlg.set_directory(d);
+        }
+        let Some(mut path) = dlg.save_file() else { return };
+        if path.extension().is_none() {
+            path.set_extension("pdf");
+        }
+        if let Some(parent) = path.parent() {
+            self.state.settings.datasheet_dir = parent.to_string_lossy().to_string();
+            let _ = settings::save(&self.state.settings);
+        }
+        let url = comp.datasheet.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.state.ds_rx = Some(rx);
+        self.state.status = format!("Downloading datasheet for {}…", comp.value);
+        std::thread::spawn(move || {
+            let res = api::download_datasheet(&url)
+                .and_then(|bytes| { std::fs::write(&path, bytes)?; Ok(path) })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+    }
+
+    fn show_library_tab(&mut self, ui: &mut egui::Ui) {
+        let lib_path = self.state.settings.lib_path.clone();
+        let lib_name = self.state.settings.lib_name.clone();
+
+        // Reload automatically whenever the library files change on disk
+        let key = library::cache_key(&lib_path, &lib_name);
+        let mut force = false;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("{lib_path}/{lib_name}")).small().weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                force = ui.small_button("⟳ Reload").clicked();
+            });
+        });
+        if force || key != self.state.lib_key || self.state.lib_contents.is_none() {
+            self.state.lib_key = key;
+            self.state.lib_contents = Some(library::load(&lib_path, &lib_name).map_err(|e| e.to_string()));
+        }
+
+        let contents = match self.state.lib_contents.as_ref().unwrap() {
+            Err(e) => {
+                ui.colored_label(egui::Color32::from_rgb(230, 90, 90), format!("⚠ Cannot read library: {e}"));
+                return;
+            }
+            Ok(c) => c.clone(),
+        };
+        if !contents.sym_exists {
+            ui.label(format!("Symbol library {lib_name}.kicad_sym does not exist yet — it will be created on first import."));
+            if ui.button("Settings…").clicked() { self.state.show_settings = true; }
+            return;
+        }
+
+        let ok   = egui::Color32::from_rgb(100, 210, 100);
+        let bad  = egui::Color32::from_rgb(230, 90, 90);
+        let warn = egui::Color32::from_rgb(230, 160, 40);
+
+        let no_fp = contents.entries.iter().filter(|e| e.fp_file.is_none() && e.fp_mismatch.is_none()).count();
+        let mismatch = contents.entries.iter().filter(|e| e.fp_mismatch.is_some()).count();
+        let no_3d = contents.entries.iter().filter(|e| !e.has_step && !e.has_wrl).count();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(format!("{} components", contents.entries.len())).strong());
+            if no_fp > 0 { ui.colored_label(bad, format!("· {no_fp} without footprint")); }
+            if mismatch > 0 {
+                ui.colored_label(warn, format!("· {mismatch} broken footprint links"))
+                    .on_hover_text("Symbol's Footprint field doesn't match the .kicad_mod filename.\nRun 🔄 Refresh Library to fix.");
+            }
+            if no_3d > 0 { ui.colored_label(warn, format!("· {no_3d} without 3D model")); }
+            if !contents.orphan_footprints.is_empty() {
+                ui.colored_label(warn, format!("· {} unused footprints", contents.orphan_footprints.len()));
+            }
+        });
+        ui.add(egui::TextEdit::singleline(&mut self.state.lib_filter)
+            .hint_text("Filter: name, value, LCSC, footprint, manufacturer…")
+            .desired_width(f32::INFINITY));
+
+        let f = self.state.lib_filter.trim().to_lowercase();
+        let rows: Vec<&library::LibEntry> = contents.entries.iter()
+            .filter(|e| f.is_empty() || [&e.name, &e.value, &e.lcsc, &e.footprint, &e.description, &e.manufacturer, &e.category]
+                .iter().any(|s| s.to_lowercase().contains(&f)))
+            .collect();
+
+        let mut clicked: Option<String> = None;
+        let sel_col = ui.visuals().selection.bg_fill;
+        use egui_extras::{Column, TableBuilder};
+        let orphan_h = if contents.orphan_footprints.is_empty() { 0.0 } else { 28.0 };
+        let table_h = ui.available_height() - orphan_h;
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .sense(egui::Sense::click())
+            .max_scroll_height(table_h)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::exact(72.0))                       // LCSC
+            .column(Column::initial(150.0).at_least(80.0))     // Name
+            .column(Column::initial(80.0).at_least(50.0))      // Value
+            .column(Column::remainder().at_least(100.0))       // Footprint
+            .column(Column::exact(30.0))                       // FP
+            .column(Column::exact(30.0))                       // 3D
+            .header(20.0, |mut h| {
+                for t in ["LCSC", "Name", "Value", "Footprint", "FP", "3D"] {
+                    h.col(|ui| { ui.label(egui::RichText::new(t).small().strong()); });
+                }
+            })
+            .body(|body| {
+                body.rows(22.0, rows.len(), |mut row| {
+                    let e = rows[row.index()];
+                    let selected = !e.lcsc.is_empty() && self.state.lib_selected.as_deref() == Some(e.lcsc.as_str());
+                    row.set_selected(selected);
+                    let lbl = |ui: &mut egui::Ui, t: egui::RichText| {
+                        if selected { ui.painter().rect_filled(ui.max_rect(), 0.0, sel_col); }
+                        ui.add(egui::Label::new(t).selectable(false).truncate());
+                    };
+                    row.col(|ui| lbl(ui, egui::RichText::new(&e.lcsc).small()));
+                    row.col(|ui| lbl(ui, egui::RichText::new(&e.name).small()));
+                    row.col(|ui| lbl(ui, egui::RichText::new(&e.value).small()));
+                    row.col(|ui| {
+                        let fp = e.footprint.split_once(':').map(|(_, f)| f).unwrap_or(&e.footprint);
+                        let t = egui::RichText::new(fp).small();
+                        lbl(ui, if e.fp_foreign_lib { t.color(warn) } else { t });
+                    });
+                    row.col(|ui| lbl(ui, if e.fp_file.is_some() {
+                        egui::RichText::new("✔").color(ok)
+                    } else if e.fp_mismatch.is_some() {
+                        egui::RichText::new("⚠").color(warn)
+                    } else {
+                        egui::RichText::new("✖").color(bad)
+                    }));
+                    row.col(|ui| lbl(ui, match (e.has_step, e.has_wrl) {
+                        (true, true)   => egui::RichText::new("✔").color(ok),
+                        (false, false) => egui::RichText::new("✖").color(bad),
+                        _              => egui::RichText::new("½").color(warn),
+                    }));
+                    let resp = row.response().on_hover_ui(|ui| {
+                        ui.strong(&e.name);
+                        if !e.description.is_empty() { ui.label(&e.description); }
+                        if !e.manufacturer.is_empty() { ui.label(format!("Manufacturer: {}", e.manufacturer)); }
+                        if !e.category.is_empty() { ui.label(format!("Category: {}", e.category)); }
+                        ui.label(format!("Footprint: {}", e.footprint));
+                        if e.fp_foreign_lib {
+                            ui.colored_label(warn, "⚠ Footprint refers to a different library nickname");
+                        }
+                        if e.fp_lib_dir.is_none() {
+                            ui.colored_label(bad, "✖ Footprint library nickname not found in fp-lib-table");
+                        } else if let Some(d) = &e.fp_lib_dir {
+                            ui.weak(format!("Footprint library: {}", d.display()));
+                        }
+                        if !e.model_ref.is_empty() { ui.weak(format!("3D model: {}", e.model_ref)); }
+                        if let Some(actual) = &e.fp_mismatch {
+                            ui.colored_label(warn, format!(
+                                "⚠ Broken link: file is {actual}.kicad_mod — run 🔄 Refresh Library to fix"));
+                        } else if e.fp_file.is_none() {
+                            ui.colored_label(bad, "✖ Footprint file missing");
+                        }
+                        ui.label(format!("3D: STEP {}  WRL {}",
+                            if e.has_step { "✔" } else { "✖" }, if e.has_wrl { "✔" } else { "✖" }));
+                        if e.lcsc.is_empty() { ui.weak("No LCSC id — not from JLCPCB"); }
+                        else { ui.weak("Click to load from JLCPCB (preview / re-import)"); }
+                    });
+                    if resp.clicked() && !e.lcsc.is_empty() {
+                        clicked = Some(e.lcsc.clone());
+                    }
+                });
+            });
+
+        if !contents.orphan_footprints.is_empty() {
+            ui.collapsing(format!("Unused footprints ({})", contents.orphan_footprints.len()), |ui| {
+                for f in &contents.orphan_footprints { ui.label(egui::RichText::new(f).small()); }
+            });
+        }
+
+        if let Some(lcsc) = clicked {
+            if self.state.lib_selected.as_deref() != Some(lcsc.as_str()) && !self.state.loading {
+                self.state.lib_selected = Some(lcsc.clone());
+                self.state.selected_idx = None;
+                self.state.lib_edit = contents.entries.iter().find(|e| e.lcsc == lcsc).and_then(|e| {
+                    let fp_file = e.fp_file.clone().or_else(|| {
+                        let dir = e.fp_lib_dir.as_ref()?;
+                        Some(dir.join(format!("{}.kicad_mod", e.fp_mismatch.as_ref()?)))
+                    })?;
+                    Some(LibEditTarget {
+                        lcsc: lcsc.clone(),
+                        fp_file,
+                        model_file: e.model_file.clone(),
+                        saved: library::ModelTransform::default(),
+                    })
+                });
+                let ctx = ui.ctx().clone();
+                self.do_detail(lcsc, &ctx);
+            }
+        }
     }
 
     fn do_refresh_library_ids(&mut self, opts: RefreshOptions, ids: Vec<String>) {
@@ -353,61 +625,13 @@ impl App {
                     Ok(c) => c,
                 };
 
-                if opts.symbols {
-                    updated_sym = update_component_in_lib(
-                        &updated_sym, &comp,
-                        &lib_name, &paths.fp_dir,
-                        hide_pin_numbers, hide_pin_names,
-                    );
-                }
-
-                if opts.footprints {
-                    // Find the existing .kicad_mod file that contains this LCSC ID.
-                    // This is more reliable than package_name() which may differ between
-                    // API calls (package_detail can change), causing a wrong filename.
-                    let existing_fp_path = export::find_fp_by_lcsc(&paths.fp_dir, lcsc_id);
-                    let fp_path = existing_fp_path.unwrap_or_else(|| {
-                        paths.fp_dir.join(format!("{}.kicad_mod", export::package_name(&comp)))
-                    });
-
-                    let (offset, rotation, scale) = if opts.keep_3d_settings {
-                        if let Ok(existing) = fs::read_to_string(&fp_path) {
-                            extract_3d_settings(&existing)
-                        } else {
-                            ([0.0f32;3], [0.0f32;3], [1.0f32,1.0,1.0])
-                        }
-                    } else {
-                        ([0.0f32;3], [0.0f32;3], [1.0f32,1.0,1.0])
-                    };
-
-                    // Detect model format from existing model dir
-                    let stem = fp_path.file_stem().unwrap_or_default().to_string_lossy();
-                    let model_ext = if paths.model_dir.join(format!("{}.wrl", stem)).exists() { "wrl" } else { "step" };
-
-                    // Skip if this file was already written by an earlier component in this run
-                    // (multiple components can share one footprint file, e.g. many 0603 resistors)
-                    if written_fps.contains(&fp_path) {
-                        // still count as success
-                    } else {
-                        let model_path = format!(
-                            "${{{}_3D}}/{}.{}",
-                            lib_name.to_uppercase().replace('-', "_"), stem, model_ext
-                        );
-                        let content = export::build_footprint_content(&comp, &stem, &model_path, offset, rotation, scale);
-                        if fs::write(&fp_path, content).is_err() {
-                            failed_count += 1; continue;
-                        }
-                        written_fps.insert(fp_path);
-                    }
-                }
-
-                if opts.models_3d {
-                    if let Some(wrl) = comp.wrl_url.as_deref().and_then(|u| api::download_wrl(u)) {
-                        let _ = export::write_wrl_model(&paths, &comp, &wrl);
-                    }
-                    if let Some(step) = comp.step_url.as_deref().and_then(|u| api::download_bytes(u).ok()) {
-                        let _ = export::write_step_model(&paths, &comp, &step);
-                    }
+                if let Err(e) = ops::refresh_component(
+                    &paths, &lib_name, &comp, &opts,
+                    hide_pin_numbers, hide_pin_names,
+                    &mut updated_sym, &mut written_fps,
+                ) {
+                    let _ = tx.send(BgMsg::RefreshStatus(format!("⚠ {} — {}", lcsc_id, e)));
+                    failed_count += 1; continue;
                 }
 
                 // Write symbol library after every component so progress is never lost
@@ -441,8 +665,27 @@ impl eframe::App for App {
         if let Some(i) = self.state.pending_select.take() {
             if self.state.selected_idx != Some(i) {
                 self.state.selected_idx = Some(i);
+                self.state.lib_selected = None;
+                self.state.lib_edit = None;
                 let lcsc = self.state.search_results[i].lcsc_id.clone();
                 self.do_detail(lcsc, ctx);
+            }
+        }
+
+        // Poll datasheet download
+        if let Some(rx) = &self.state.ds_rx {
+            match rx.try_recv() {
+                Ok(res) => {
+                    self.state.status = match res {
+                        Ok(p) => format!("✓ Datasheet saved → {}", p.display()),
+                        Err(e) => format!("⚠ Datasheet download failed: {e}"),
+                    };
+                    self.state.ds_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                }
+                Err(_) => self.state.ds_rx = None,
             }
         }
 
@@ -478,26 +721,7 @@ impl eframe::App for App {
                     self.state.model_rotation = [0.0, 0.0, 0.0];
                     self.state.model_scale    = [1.0, 1.0, 1.0];
                     self.state.model_viewer.reset_view();
-                    let pads: Vec<model3d::PadInfo> = comp.pads.iter()
-                        .map(|p| {
-                            model3d::PadInfo {
-                                cx: p.cx, cy: -p.cy,  // negate Y: KiCad 3D negates PCB Y-down to Y-up
-                                w: p.w, h: p.h,
-                                shape: p.shape.clone(),
-                                drill: p.drill,
-                                drill_slot: p.drill_slot,
-                                npth: p.npth,
-                                rotation: -p.rotation,  // Y-flip also mirrors rotation
-                                poly_pts: p.poly_pts.iter().map(|pt| [pt[0], -pt[1]]).collect(),
-                            }
-                        })
-                        .collect();
-                    let drawings: Vec<model3d::PcbDrawing> = comp.fp_drawings.iter()
-                        .map(|d| model3d::PcbDrawing {
-                            tris: d.tris.iter().map(|pt| [pt[0], -pt[1]]).collect(),
-                            color: d.color,
-                        })
-                        .collect();
+                    let (pads, drawings) = ops::pads_3d(&comp);
                     // Prefer STEP over WRL - better format, more standard
                     if let Some(ref bytes) = step {
                         self.state.model_viewer.load_step(bytes, &pads, &drawings, [0.0, 0.0, 0.0], false);
@@ -506,6 +730,35 @@ impl eframe::App for App {
                         self.state.model_viewer.load(bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
                     } else {
                         self.state.model_viewer.has_model = false;
+                    }
+                    // Opened from the Library tab: show the library's own model + transform
+                    let mut lib_note = String::new();
+                    if let Some(t) = self.state.lib_edit.as_mut().filter(|t| t.lcsc == comp.lcsc_id) {
+                        if let Some(tr) = std::fs::read_to_string(&t.fp_file).ok()
+                            .and_then(|txt| library::read_model_transform(&txt))
+                        {
+                            t.saved = tr;
+                            self.state.model_offset   = tr.offset;
+                            self.state.model_rotation = tr.rotation;
+                            self.state.model_scale    = tr.scale;
+                            self.state.model_unified_scale = tr.scale[0] == tr.scale[1] && tr.scale[1] == tr.scale[2];
+                        }
+                        // The library footprint may have its own origin/pads — show those
+                        let (pads, drawings) = match ops::local_pads_3d(&t.fp_file) {
+                            Some(lp) => (lp, Vec::new()),
+                            None => (pads.clone(), drawings.clone()),
+                        };
+                        if let Some(mf) = &t.model_file {
+                            if let Ok(bytes) = std::fs::read(mf) {
+                                let is_wrl = mf.extension().map_or(false, |x| x.eq_ignore_ascii_case("wrl"));
+                                if is_wrl {
+                                    self.state.model_viewer.load(&bytes, &pads, &drawings, [0.0, 0.0, 0.0]);
+                                } else {
+                                    self.state.model_viewer.load_step(&bytes, &pads, &drawings, [0.0, 0.0, 0.0], false);
+                                }
+                                lib_note = format!(" — library model {}", mf.file_name().unwrap_or_default().to_string_lossy());
+                            }
+                        }
                     }
                     let model_status = match (&wrl, &step) {
                         (Some(_), Some(_)) => " (WRL+STEP)",
@@ -519,7 +772,7 @@ impl eframe::App for App {
                         format!("Loaded: {} ({}){} — {}", comp.value, comp.lcsc_id, model_status, w)
                     } else {
                         format!("Loaded: {} ({}){}", comp.value, comp.lcsc_id, model_status)
-                    };
+                    } + &lib_note;
                     // Auto-check "Hide pin names" for passives and crystals
                     let cat = comp.category.to_lowercase();
                     self.state.hide_pin_names = cat.contains("capacitor") || cat.contains("resistor")
@@ -566,19 +819,117 @@ impl eframe::App for App {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label("Library path:");
-                    ui.text_edit_singleline(&mut self.state.settings.lib_path);
-                    if ui.button("Browse…").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            self.state.settings.lib_path = path.to_string_lossy().to_string();
+                    ui.label("Library folder:");
+                    ui.add(egui::TextEdit::singleline(&mut self.state.settings.lib_path)
+                        .desired_width(420.0));
+                    ui.horizontal(|ui| {
+                        if ui.button("📁 Browse folder…")
+                            .on_hover_text("Pick the folder that contains <name>.kicad_sym / <name>.pretty.\nPicking a .pretty or .3dshapes folder (or anything inside it) also works.")
+                            .clicked()
+                        {
+                            let mut dlg = rfd::FileDialog::new();
+                            let cur = std::path::Path::new(&self.state.settings.lib_path);
+                            if cur.is_dir() { dlg = dlg.set_directory(cur); }
+                            if let Some(path) = dlg.pick_folder() {
+                                let (dir, name) = settings::resolve_pick(&path);
+                                self.state.settings.lib_path = dir.to_string_lossy().to_string();
+                                if let Some(n) = name { self.state.settings.lib_name = n; }
+                            }
+                        }
+                        if ui.button("📄 Open existing library…")
+                            .on_hover_text("Pick an existing .kicad_sym file — folder and name are set from it.")
+                            .clicked()
+                        {
+                            let mut dlg = rfd::FileDialog::new()
+                                .add_filter("KiCad symbol library", &["kicad_sym"]);
+                            let cur = std::path::Path::new(&self.state.settings.lib_path);
+                            if cur.is_dir() { dlg = dlg.set_directory(cur); }
+                            if let Some(path) = dlg.pick_file() {
+                                let (dir, name) = settings::resolve_pick(&path);
+                                self.state.settings.lib_path = dir.to_string_lossy().to_string();
+                                if let Some(n) = name { self.state.settings.lib_name = n; }
+                            }
+                        }
+                    });
+
+                    // Re-scan only when the path changes
+                    let lp = self.state.settings.lib_path.clone();
+                    if self.state.lib_scan.as_ref().map(|(p, _)| p != &lp).unwrap_or(true) {
+                        self.state.lib_scan = Some((lp.clone(), settings::scan_library_dir(&lp)));
+                    }
+                    let scan = self.state.lib_scan.as_ref().unwrap().1.clone();
+
+                    ui.add_space(4.0);
+                    let warn = egui::Color32::from_rgb(230, 160, 40);
+                    let ok = egui::Color32::from_rgb(90, 190, 90);
+
+                    if let Some((dir, name)) = &scan.suggested_parent {
+                        ui.colored_label(warn, format!(
+                            "⚠ This path is inside library \"{}\" — the library folder is one level up.", name));
+                        if ui.button(format!("Use {}  (name: {})", dir, name)).clicked() {
+                            self.state.settings.lib_path = dir.clone();
+                            self.state.settings.lib_name = name.clone();
+                        }
+                    } else if !scan.exists {
+                        ui.colored_label(warn, "⚠ Folder does not exist — it will be created on import.");
+                    } else if scan.libs.is_empty() {
+                        if scan.child_dirs.is_empty() {
+                            ui.label("No KiCad libraries in this folder — a new one will be created.");
+                        } else {
+                            ui.colored_label(warn, "⚠ No libraries here, but found some in sub-folders:");
+                            for (dir, names) in &scan.child_dirs {
+                                for n in names {
+                                    if ui.button(format!("Use {}  (name: {})", dir, n)).clicked() {
+                                        self.state.settings.lib_path = dir.clone();
+                                        self.state.settings.lib_name = n.clone();
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        ui.label("Libraries found in this folder (click to select):");
+                        for li in &scan.libs {
+                            let parts = [
+                                (li.has_sym, "symbols"),
+                                (li.has_fp, "footprints"),
+                                (li.has_3d, "3D"),
+                            ]
+                            .iter()
+                            .filter(|(h, _)| *h)
+                            .map(|(_, s)| *s)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                            let selected = li.name == self.state.settings.lib_name;
+                            if ui.selectable_label(selected, format!("📚 {}   ({})", li.name, parts)).clicked() {
+                                self.state.settings.lib_name = li.name.clone();
+                            }
                         }
                     }
+
                     ui.add_space(4.0);
                     ui.label("Library name:");
                     ui.text_edit_singleline(&mut self.state.settings.lib_name);
+                    let name = self.state.settings.lib_name.trim().to_string();
+                    if name.is_empty() {
+                        ui.colored_label(warn, "⚠ Library name is empty.");
+                    } else if scan.exists && scan.suggested_parent.is_none() {
+                        if scan.libs.iter().any(|l| l.name == name) {
+                            ui.colored_label(ok, format!("✔ Importing into existing library \"{}\".", name));
+                        } else if !scan.libs.is_empty() {
+                            ui.colored_label(warn, format!(
+                                "⚠ \"{}\" does not exist here — a NEW library will be created.", name));
+                        }
+                    }
+                    ui.add_space(2.0);
+                    ui.weak(format!("→ {}",
+                        std::path::Path::new(self.state.settings.lib_path.trim())
+                            .join(format!("{}.kicad_sym", name)).display()));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
+                            let st = &mut self.state.settings;
+                            st.lib_path = st.lib_path.trim().to_string();
+                            st.lib_name = st.lib_name.trim().to_string();
                             let _ = settings::save(&self.state.settings);
                             self.state.show_settings = false;
                         }
@@ -805,6 +1156,17 @@ impl eframe::App for App {
             .min_width(200.0)
             .default_width(600.0)
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.state.left_tab, LeftTab::Search,
+                        format!("🔍 Search ({})", self.state.search_results.len()));
+                    ui.selectable_value(&mut self.state.left_tab, LeftTab::Library,
+                        format!("📚 Library: {}", self.state.settings.lib_name));
+                });
+                ui.separator();
+                if self.state.left_tab == LeftTab::Library {
+                    self.show_library_tab(ui);
+                    return;
+                }
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new(
                     format!("{} results  (click header to sort)", self.state.search_results.len())
@@ -1064,6 +1426,7 @@ impl eframe::App for App {
                             .collect();
                         rows.extend_from_slice(&extra);
 
+                        let mut ds_save = false;
                         {
                             use egui_extras::{Column, TableBuilder};
                             TableBuilder::new(&mut cols[1])
@@ -1085,6 +1448,24 @@ impl eframe::App for App {
                                                     egui::RichText::new(*k).strong()
                                                 ).selectable(false));
                                             });
+                                            if *k == "Datasheet" && !v.trim().is_empty() {
+                                                row.col(|ui| {
+                                                    if ui.small_button("🌐 Open").on_hover_text(*v).clicked() {
+                                                        ui.ctx().open_url(egui::OpenUrl::new_tab(v.trim()));
+                                                    }
+                                                    let busy = self.state.ds_rx.is_some();
+                                                    if busy {
+                                                        ui.spinner();
+                                                    } else if ui.small_button("💾 Save as…").clicked() {
+                                                        ds_save = true;
+                                                    }
+                                                    ui.add(egui::Label::new(egui::RichText::new(*v).small().weak())
+                                                        .selectable(false)
+                                                        .truncate())
+                                                        .on_hover_text(*v);
+                                                });
+                                                return;
+                                            }
                                             row.col(|ui| {
                                                 ui.add(egui::Label::new(*v)
                                                     .selectable(false)
@@ -1094,6 +1475,9 @@ impl eframe::App for App {
                                         });
                                     }
                                 });
+                        }
+                        if ds_save {
+                            self.save_datasheet(&comp);
                         }
                     }
 
@@ -1309,6 +1693,46 @@ impl eframe::App for App {
                 ui.separator();
                 ui.add_space(4.0);
 
+                // Save 3D transform back into the library footprint
+                if let Some(t) = self.state.lib_edit.clone().filter(|t| t.lcsc == comp.lcsc_id) {
+                    let cur = library::ModelTransform {
+                        offset: self.state.model_offset,
+                        rotation: self.state.model_rotation,
+                        scale: self.state.model_scale,
+                    };
+                    let dirty = cur != t.saved;
+                    ui.label(egui::RichText::new("Library footprint").strong());
+                    ui.label(egui::RichText::new(t.fp_file.display().to_string()).small().monospace());
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(dirty, egui::Button::new("💾 Save 3D transform to library")).clicked() {
+                            match library::save_model_transform(&t.fp_file, &cur) {
+                                Ok(()) => {
+                                    if let Some(lt) = self.state.lib_edit.as_mut() { lt.saved = cur; }
+                                    self.state.status = format!("✓ Saved 3D transform → {}",
+                                        t.fp_file.file_name().unwrap_or_default().to_string_lossy());
+                                }
+                                Err(e) => self.state.status = format!("⚠ Save failed: {e}"),
+                            }
+                        }
+                        if ui.add_enabled(dirty, egui::Button::new("↺ Revert")).clicked() {
+                            self.state.model_offset   = t.saved.offset;
+                            self.state.model_rotation = t.saved.rotation;
+                            self.state.model_scale    = t.saved.scale;
+                        }
+                        if dirty {
+                            ui.colored_label(egui::Color32::from_rgb(230, 160, 40), "● unsaved changes");
+                        } else {
+                            ui.weak("saved");
+                        }
+                    });
+                    if t.model_file.is_none() {
+                        ui.weak("(library model file not found — showing JLCPCB model)");
+                    }
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                }
+
                 // Import
                 ui.label(egui::RichText::new("Import to KiCad Library").strong());
                 ui.horizontal(|ui| {
@@ -1332,65 +1756,21 @@ impl eframe::App for App {
                 }
                 ui.add_space(4.0);
                 if ui.button("  Import  ").clicked() {
-                    let lib_name = self.state.settings.lib_name.clone();
-                    let paths = export::LibPaths::new(&self.state.settings.lib_path, &lib_name);
-
-                    // Priority: STEP > WRL (STEP is better format)
-                    let model_ext = if self.state.step_bytes.is_some() {
-                        "step"
-                    } else if self.state.wrl_bytes.is_some() {
-                        "wrl"
-                    } else {
-                        "step"  // Default fallback
+                    let opts = ops::ImportOptions {
+                        symbol: self.state.import_symbol,
+                        footprint: self.state.import_footprint,
+                        model_3d: self.state.import_package,
+                        hide_pin_numbers: self.state.hide_pin_numbers,
+                        hide_pin_names: self.state.hide_pin_names,
+                        transform: library::ModelTransform {
+                            offset: self.state.model_offset,
+                            rotation: self.state.model_rotation,
+                            scale: self.state.model_scale,
+                        },
                     };
-
-                    let result: anyhow::Result<()> = (|| {
-                        paths.ensure_dirs()?;
-
-                        // Import symbol
-                        if self.state.import_symbol {
-                            export::write_symbol(&paths, &comp, &lib_name,
-                                self.state.hide_pin_numbers,
-                                self.state.hide_pin_names)?;
-                        }
-
-                        // Import footprint
-                        if self.state.import_footprint {
-                            // No swap - both use Z-up directly
-                            let kicad_offset = [
-                                self.state.model_offset[0],
-                                self.state.model_offset[1],
-                                self.state.model_offset[2],
-                            ];
-
-                            let kicad_rotation = [
-                                self.state.model_rotation[0],
-                                self.state.model_rotation[1],
-                                self.state.model_rotation[2],
-                            ];
-
-                            // Viewer is Z-up (same as KiCad) - use scale directly
-                            let kicad_scale = [
-                                self.state.model_scale[0],
-                                self.state.model_scale[1],
-                                self.state.model_scale[2],
-                            ];
-
-                            export::write_footprint(&paths, &comp, &lib_name,
-                                kicad_offset, kicad_rotation, kicad_scale, model_ext)?;
-                        }
-
-                        // Import 3D models
-                        if self.state.import_package {
-                            if let Some(step) = &self.state.step_bytes {
-                                export::write_step_model(&paths, &comp, step)?;
-                            }
-                            if let Some(wrl) = &self.state.wrl_bytes {
-                                export::write_wrl_model(&paths, &comp, wrl)?;
-                            }
-                        }
-                        Ok(())
-                    })();
+                    let result = ops::import_component(
+                        &self.state.settings.lib_path, &self.state.settings.lib_name, &comp,
+                        self.state.wrl_bytes.as_deref(), self.state.step_bytes.as_deref(), &opts);
                     self.state.status = match result {
                         Ok(()) => format!("Imported {} ({}) → {}/{}",
                             comp.value, comp.lcsc_id,
@@ -2137,51 +2517,25 @@ fn extract_lcsc_ids_with_names(content: &str) -> Vec<(String, String)> {
     result
 }
 
-fn update_component_in_lib(
-    content: &str,
-    comp: &Component,
-    lib_name: &str,
-    fp_dir: &std::path::Path,
-    hide_pin_numbers: bool,
-    hide_pin_names: bool,
-) -> String {
-    let name = export::sanitize_name(&comp.value);
-    let fp_name = export::find_fp_by_lcsc(fp_dir, &comp.lcsc_id)
-        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| export::package_name(comp));
-    let new_sym = export::build_symbol(comp, lib_name, &fp_name, hide_pin_numbers, hide_pin_names);
-    export::replace_symbol_in_lib(content, &name, &new_sym)
-}
 
 
 
 
-fn extract_3d_settings(content: &str) -> ([f32;3], [f32;3], [f32;3]) {
-    let parse_xyz = |label: &str| -> [f32;3] {
-        for line in content.lines() {
-            if line.contains(label) {
-                if let Some(s) = line.find("(xyz ") {
-                    let after = &line[s + 5..];
-                    if let Some(e) = after.find(')') {
-                        let nums: Vec<f32> = after[..e].split_whitespace()
-                            .filter_map(|v| v.parse().ok()).collect();
-                        if nums.len() >= 3 { return [nums[0], nums[1], nums[2]]; }
-                    }
-                }
-            }
-        }
-        [0.0; 3]
-    };
-    let offset   = parse_xyz("(offset");
-    let scale_raw = parse_xyz("(scale");
-    let scale    = if scale_raw == [0.0;3] { [1.0,1.0,1.0] } else { scale_raw };
-    let rotation = parse_xyz("(rotate");
-    (offset, rotation, scale)
-}
 
 fn main() -> eframe::Result<()> {
     // Parse command-line arguments
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--mcp") {
+        if let Err(e) = mcp::run() {
+            eprintln!("[mcp] fatal: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: jlcpcb-kicad [LIB_PATH]   start the GUI\n       jlcpcb-kicad --mcp       run as MCP server on stdio");
+        return Ok(());
+    }
     let lib_path_override = if args.len() > 1 {
         Some(args[1].clone())
     } else {

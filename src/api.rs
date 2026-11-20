@@ -1721,3 +1721,66 @@ mod c2887271_tests {
         assert_eq!((x2, y2), (19.53, -7.03));
     }
 }
+
+
+/// Download a datasheet PDF. LCSC datasheet links return an HTML viewer page,
+/// so if the response isn't a PDF, the real `datasheet.lcsc.com/…pdf` link is
+/// extracted from the page and fetched instead.
+pub fn download_datasheet(url: &str) -> Result<Vec<u8>> {
+    let url = url.trim();
+    if url.is_empty() {
+        anyhow::bail!("component has no datasheet URL");
+    }
+    let url = if url.starts_with("//") { format!("https:{url}") } else { url.to_string() };
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0")
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+    let first = client.get(&url).send()?.error_for_status()?.bytes()?.to_vec();
+    if first.starts_with(b"%PDF") {
+        return Ok(first);
+    }
+    let html = String::from_utf8_lossy(&first)
+        .replace("\\u0026", "&")
+        .replace("&amp;", "&")
+        .replace("\\/", "/");
+    let real = find_pdf_link(&html)
+        .ok_or_else(|| anyhow::anyhow!("datasheet page contains no PDF link"))?;
+    let pdf = client.get(&real).send()?.error_for_status()?.bytes()?.to_vec();
+    if !pdf.starts_with(b"%PDF") {
+        anyhow::bail!("downloaded file is not a PDF ({real})");
+    }
+    Ok(pdf)
+}
+
+fn find_pdf_link(html: &str) -> Option<String> {
+    for marker in ["https://datasheet.lcsc.com/", "https://wmsc.lcsc.com/"] {
+        let mut from = 0;
+        while let Some(i) = html[from..].find(marker) {
+            let start = from + i;
+            let end = html[start..]
+                .find(|c: char| c == '"' || c == '\'' || c == '<' || c == '\\' || c.is_whitespace())
+                .map(|e| start + e)
+                .unwrap_or(html.len());
+            let link = &html[start..end];
+            if link.contains(".pdf") {
+                return Some(link.to_string());
+            }
+            from = end;
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod datasheet_tests {
+    #[test]
+    fn extracts_lcsc_pdf_link() {
+        let html = r#"<a href="https://static.lcsc.com/viewer.html?file=https%3A%2F%2Fx.pdf">x</a>
+            {"pdfUrl":"https://datasheet.lcsc.com/datasheet/pdf/d54143.pdf?productCode=C5362211"}"#;
+        assert_eq!(
+            super::find_pdf_link(html).as_deref(),
+            Some("https://datasheet.lcsc.com/datasheet/pdf/d54143.pdf?productCode=C5362211")
+        );
+    }
+}
